@@ -1,0 +1,324 @@
+import React, { memo } from 'react';
+import { View, Text, StyleSheet, Animated } from 'react-native';
+import { ActionZone, ActionZoneResult, TrendDirection } from '../lib/indicators/action-zone';
+
+interface ActionZoneDisplayProps {
+  result: ActionZoneResult;
+  size?: 'small' | 'medium' | 'large';
+  showDetails?: boolean;
+  animated?: boolean;
+}
+
+// Zone color mappings for visual consistency
+const ZONE_COLORS = {
+  [ActionZone.GREEN]: '#10B981',      // Strong buy - emerald
+  [ActionZone.BLUE]: '#3B82F6',       // Buy - blue
+  [ActionZone.LIGHT_BLUE]: '#60A5FA', // Pre-buy - light blue
+  [ActionZone.GRAY]: '#6B7280',       // Neutral - gray
+  [ActionZone.YELLOW]: '#F59E0B',     // Pre-sell - amber
+  [ActionZone.ORANGE]: '#F97316',     // Sell - orange
+  [ActionZone.RED]: '#EF4444',        // Strong sell - red
+} as const;
+
+// Zone background colors (lighter versions)
+const ZONE_BG_COLORS = {
+  [ActionZone.GREEN]: '#D1FAE5',
+  [ActionZone.BLUE]: '#DBEAFE',
+  [ActionZone.LIGHT_BLUE]: '#EBF8FF',
+  [ActionZone.GRAY]: '#F3F4F6',
+  [ActionZone.YELLOW]: '#FEF3CD',
+  [ActionZone.ORANGE]: '#FED7AA',
+  [ActionZone.RED]: '#FEE2E2',
+} as const;
+
+// Zone text labels
+const ZONE_LABELS = {
+  [ActionZone.GREEN]: 'Strong Buy Zone',
+  [ActionZone.BLUE]: 'Buy Zone',
+  [ActionZone.LIGHT_BLUE]: 'Pre-Buy Zone',
+  [ActionZone.GRAY]: 'Neutral Zone',
+  [ActionZone.YELLOW]: 'Pre-Sell Zone',
+  [ActionZone.ORANGE]: 'Sell Zone',
+  [ActionZone.RED]: 'Strong Sell Zone',
+} as const;
+
+// Short zone labels
+const ZONE_SHORT_LABELS = {
+  [ActionZone.GREEN]: 'Strong Buy',
+  [ActionZone.BLUE]: 'Buy',
+  [ActionZone.LIGHT_BLUE]: 'Pre-Buy',
+  [ActionZone.GRAY]: 'Neutral',
+  [ActionZone.YELLOW]: 'Pre-Sell',
+  [ActionZone.ORANGE]: 'Sell',
+  [ActionZone.RED]: 'Strong Sell',
+} as const;
+
+// Trend direction indicators
+const TREND_INDICATORS = {
+  [TrendDirection.BULLISH]: '↗️',
+  [TrendDirection.BEARISH]: '↘️',
+  [TrendDirection.NEUTRAL]: '→',
+} as const;
+
+const TREND_COLORS = {
+  [TrendDirection.BULLISH]: '#10B981',
+  [TrendDirection.BEARISH]: '#EF4444',
+  [TrendDirection.NEUTRAL]: '#6B7280',
+} as const;
+
+const ActionZoneDisplay: React.FC<ActionZoneDisplayProps> = ({
+  result,
+  size = 'medium',
+  showDetails = true,
+  animated = false,
+}) => {
+  const zoneColor = ZONE_COLORS[result.zone];
+  const zoneBgColor = ZONE_BG_COLORS[result.zone];
+  const zoneLabel = size === 'small' ? ZONE_SHORT_LABELS[result.zone] : ZONE_LABELS[result.zone];
+  const trendIndicator = TREND_INDICATORS[result.trend];
+  const trendColor = TREND_COLORS[result.trend];
+
+  // Calculate signal indicators
+  const hasSignal = result.isBuySignal || result.isSellSignal;
+  const signalType = result.isBuySignal ? 'BUY' : result.isSellSignal ? 'SELL' : null;
+
+  const sizeStyles = getSize
+
+Styles(size);
+
+  return (
+    <View style={[styles.container, sizeStyles.container]}>
+      {/* Zone Display */}
+      <View style={[
+        styles.zoneContainer,
+        { backgroundColor: zoneBgColor, borderColor: zoneColor },
+        sizeStyles.zoneContainer,
+      ]}>
+        <View style={styles.zoneHeader}>
+          <View style={[styles.zoneIndicator, { backgroundColor: zoneColor }]} />
+          <Text style={[styles.zoneLabel, sizeStyles.zoneLabel, { color: zoneColor }]}>
+            {zoneLabel}
+          </Text>
+          {size !== 'small' && (
+            <View style={[styles.trendContainer]}>
+              <Text style={[styles.trendIndicator, sizeStyles.trendIndicator]}>
+                {trendIndicator}
+              </Text>
+              <Text style={[styles.trendLabel, sizeStyles.trendLabel, { color: trendColor }]}>
+                {result.trend}
+              </Text>
+            </View>
+          )}
+        </View>
+
+        {/* Strength Bar */}
+        <View style={[styles.strengthContainer, sizeStyles.strengthContainer]}>
+          <View style={styles.strengthBar}>
+            <View
+              style={[
+                styles.strengthFill,
+                {
+                  width: `${result.strength}%`,
+                  backgroundColor: zoneColor,
+                },
+                sizeStyles.strengthFill,
+              ]}
+            />
+          </View>
+          <Text style={[styles.strengthText, sizeStyles.strengthText]}>
+            {Math.round(result.strength)}%
+          </Text>
+        </View>
+
+        {/* Signal Indicators */}
+        {hasSignal && signalType && (
+          <View style={[
+            styles.signalContainer,
+            signalType === 'BUY' ? styles.buySignal : styles.sellSignal,
+            sizeStyles.signalContainer,
+          ]}>
+            <Text style={[styles.signalText, sizeStyles.signalText]}>
+              {signalType === 'BUY' ? '🟢' : '🔴'} {signalType} SIGNAL
+            </Text>
+          </View>
+        )}
+
+        {/* Details Section */}
+        {showDetails && size !== 'small' && (
+          <View style={styles.detailsContainer}>
+            <View style={styles.detailRow}>
+              <Text style={styles.detailLabel}>Trend:</Text>
+              <Text style={[styles.detailValue, { color: trendColor }]}>
+                {result.trend} {trendIndicator}
+              </Text>
+            </View>
+            <View style={styles.detailRow}>
+              <Text style={styles.detailLabel}>Strength:</Text>
+              <Text style={[styles.detailValue, { color: zoneColor }]}>
+                {Math.round(result.strength)}/100
+              </Text>
+            </View>
+            {hasSignal && (
+              <View style={styles.detailRow}>
+                <Text style={styles.detailLabel}>Signal:</Text>
+                <Text style={[
+                  styles.detailValue,
+                  { color: result.isBuySignal ? '#10B981' : '#EF4444' }
+                ]}>
+                  {signalType}
+                </Text>
+              </View>
+            )}
+          </View>
+        )}
+      </View>
+    </View>
+  );
+};
+
+// Dynamic size styles
+const getSizeStyles = (size: 'small' | 'medium' | 'large') => {
+  const baseSizes = {
+    small: {
+      container: { minHeight: 60 },
+      zoneContainer: { padding: 8 },
+      zoneLabel: { fontSize: 12, fontWeight: '500' as const },
+      strengthContainer: { marginTop: 4 },
+      strengthFill: { height: 3 },
+      strengthText: { fontSize: 10 },
+      signalContainer: { paddingVertical: 4, paddingHorizontal: 8, marginTop: 4 },
+      signalText: { fontSize: 10 },
+      trendIndicator: { fontSize: 12 },
+      trendLabel: { fontSize: 10 },
+    },
+    medium: {
+      container: { minHeight: 100 },
+      zoneContainer: { padding: 12 },
+      zoneLabel: { fontSize: 14, fontWeight: '600' as const },
+      strengthContainer: { marginTop: 8 },
+      strengthFill: { height: 4 },
+      strengthText: { fontSize: 12 },
+      signalContainer: { paddingVertical: 6, paddingHorizontal: 12, marginTop: 8 },
+      signalText: { fontSize: 12 },
+      trendIndicator: { fontSize: 14 },
+      trendLabel: { fontSize: 12 },
+    },
+    large: {
+      container: { minHeight: 140 },
+      zoneContainer: { padding: 16 },
+      zoneLabel: { fontSize: 16, fontWeight: '600' as const },
+      strengthContainer: { marginTop: 12 },
+      strengthFill: { height: 6 },
+      strengthText: { fontSize: 14 },
+      signalContainer: { paddingVertical: 8, paddingHorizontal: 16, marginTop: 12 },
+      signalText: { fontSize: 14 },
+      trendIndicator: { fontSize: 16 },
+      trendLabel: { fontSize: 14 },
+    },
+  };
+
+  return baseSizes[size];
+};
+
+const styles = StyleSheet.create({
+  container: {
+    marginVertical: 4,
+  },
+  zoneContainer: {
+    borderRadius: 12,
+    borderWidth: 2,
+  },
+  zoneHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  zoneIndicator: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginRight: 8,
+  },
+  zoneLabel: {
+    flex: 1,
+    fontWeight: '600',
+  },
+  trendContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  trendIndicator: {
+    fontWeight: '600',
+  },
+  trendLabel: {
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  strengthContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  strengthBar: {
+    flex: 1,
+    height: 4,
+    backgroundColor: '#E5E7EB',
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  strengthFill: {
+    height: '100%',
+    borderRadius: 2,
+  },
+  strengthText: {
+    fontWeight: '600',
+    color: '#374151',
+    minWidth: 35,
+    textAlign: 'right',
+  },
+  signalContainer: {
+    backgroundColor: 'rgba(0, 0, 0, 0.1)',
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  buySignal: {
+    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+    borderColor: '#10B981',
+    borderWidth: 1,
+  },
+  sellSignal: {
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+    borderColor: '#EF4444',
+    borderWidth: 1,
+  },
+  signalText: {
+    fontWeight: '700',
+    color: '#111827',
+  },
+  detailsContainer: {
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0, 0, 0, 0.1)',
+  },
+  detailRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  detailLabel: {
+    fontSize: 12,
+    color: '#6B7280',
+    fontWeight: '500',
+  },
+  detailValue: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+});
+
+export default memo(ActionZoneDisplay);

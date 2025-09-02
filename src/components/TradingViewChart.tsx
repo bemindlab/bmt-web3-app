@@ -1,0 +1,332 @@
+import React, { useRef, useState } from 'react';
+import {
+  View,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  Modal,
+  SafeAreaView,
+  StatusBar,
+} from 'react-native';
+import { WebView } from 'react-native-webview';
+import { Ionicons } from '@expo/vector-icons';
+
+interface TradingViewChartProps {
+  symbol: string;
+  theme?: 'light' | 'dark';
+  interval?: string;
+  height?: number;
+  compact?: boolean;
+  showFullScreenButton?: boolean;
+}
+
+export const TradingViewChart: React.FC<TradingViewChartProps> = ({
+  symbol = 'BTCUSDT',
+  theme = 'light',
+  interval: _interval = 'D',
+  height = 400,
+  compact = false,
+  showFullScreenButton = true,
+}) => {
+  const webViewRef = useRef<WebView>(null);
+  const [isFullScreen, setIsFullScreen] = useState(false);
+
+  // Convert symbol format (BTC/USDT -> BTCUSDT)
+  const formattedSymbol = symbol.replace('/', '');
+
+  // Adjust height for compact mode
+  const chartHeight = compact ? Math.min(height, 220) : height;
+
+  // Generate chart HTML with appropriate configuration
+  const generateChartHTML = (isFullScreenMode: boolean = false) => {
+    const hideToolbar = compact && !isFullScreenMode;
+    const hideLegend = compact && !isFullScreenMode;
+
+    return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+      <style>
+        body {
+          margin: 0;
+          padding: 0;
+          background-color: ${theme === 'dark' ? '#1a1a1a' : '#ffffff'};
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+        .tradingview-widget-container {
+          height: ${isFullScreenMode ? '100vh' : `${chartHeight}px`};
+          width: 100%;
+          position: relative;
+          overflow: hidden;
+        }
+        .loading-message {
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          color: ${theme === 'dark' ? '#ffffff' : '#333333'};
+          font-size: 14px;
+          text-align: center;
+        }
+        .error-message {
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          color: #ff4444;
+          font-size: 12px;
+          text-align: center;
+          padding: 10px;
+        }
+      </style>
+    </head>
+    <body>
+      <!-- TradingView Widget BEGIN -->
+      <div class="tradingview-widget-container">
+        <div class="loading-message" id="loading">Loading chart...</div>
+        <div class="tradingview-widget-container__widget" id="tradingview_chart"></div>
+      </div>
+
+      <script type="text/javascript">
+        // Enhanced widget loading with error handling
+        function initTradingViewWidget() {
+          try {
+            // Hide loading message once widget starts loading
+            const loading = document.getElementById('loading');
+            if (loading) {
+              loading.style.display = 'none';
+            }
+
+            new TradingView.widget({
+              "autosize": true,
+              "symbol": "BINANCE:${formattedSymbol}",
+              "interval": "15",
+              "timezone": "Etc/UTC",
+              "theme": "${theme}",
+              "style": "1",
+              "locale": "en",
+              "toolbar_bg": "${theme === 'dark' ? '#1a1a1a' : '#f1f3f6'}",
+              "enable_publishing": false,
+              "hide_top_toolbar": ${hideToolbar},
+              "hide_legend": ${hideLegend},
+              "save_image": false,
+              "container_id": "tradingview_chart",
+              "height": ${isFullScreenMode ? '100%' : chartHeight},
+              "width": "100%"
+            });
+          } catch (error) {
+            console.error('TradingView widget error:', error);
+            const container = document.querySelector('.tradingview-widget-container__widget');
+            if (container) {
+              container.innerHTML = '<div class="error-message">Chart unavailable<br/>Please check internet connection</div>';
+            }
+          }
+        }
+
+        // Load TradingView library with timeout fallback
+        const script = document.createElement('script');
+        script.src = 'https://s3.tradingview.com/tv.js';
+        script.async = true;
+        script.onload = initTradingViewWidget;
+        script.onerror = function() {
+          console.error('Failed to load TradingView library');
+          const container = document.querySelector('.tradingview-widget-container__widget');
+          if (container) {
+            container.innerHTML = '<div class="error-message">Failed to load TradingView<br/>Network error or script blocked</div>';
+          }
+        };
+
+        // Timeout fallback in case script doesn't load
+        setTimeout(function() {
+          if (typeof TradingView === 'undefined') {
+            console.warn('TradingView library not loaded after 10 seconds');
+            const loading = document.getElementById('loading');
+            if (loading && loading.style.display !== 'none') {
+              const container = document.querySelector('.tradingview-widget-container__widget');
+              if (container) {
+                container.innerHTML = '<div class="error-message">Chart loading timeout<br/>Please refresh</div>';
+              }
+            }
+          }
+        }, 10000);
+
+        document.head.appendChild(script);
+      </script>
+      <!-- TradingView Widget END -->
+    </body>
+    </html>
+    `;
+  };
+
+  const lightweightChart = generateChartHTML();
+
+  return (
+    <>
+      <View style={[compact ? styles.compactContainer : styles.container, { height: chartHeight }]}>
+        {/* Full Screen Button */}
+        {showFullScreenButton && (
+          <TouchableOpacity
+            style={styles.fullScreenButton}
+            onPress={() => setIsFullScreen(true)}
+            activeOpacity={0.7}
+          >
+            <Ionicons
+              name="expand-outline"
+              size={20}
+              color={theme === 'dark' ? '#ffffff' : '#666666'}
+            />
+          </TouchableOpacity>
+        )}
+
+        <WebView
+          ref={webViewRef}
+          source={{ html: lightweightChart }}
+          style={styles.webView}
+          scrollEnabled={false}
+          javaScriptEnabled={true}
+          domStorageEnabled={true}
+          startInLoadingState={true}
+          originWhitelist={['*']}
+          mixedContentMode="compatibility"
+          allowsInlineMediaPlayback={true}
+          mediaPlaybackRequiresUserAction={false}
+          allowsBackForwardNavigationGestures={false}
+          onError={(syntheticEvent) => {
+            const { nativeEvent } = syntheticEvent;
+            if (__DEV__) {
+              console.warn('TradingView WebView error:', nativeEvent);
+            }
+          }}
+          onHttpError={(syntheticEvent) => {
+            const { nativeEvent } = syntheticEvent;
+            if (__DEV__) {
+              console.warn('TradingView HTTP error:', nativeEvent);
+            }
+          }}
+          onLoadStart={() => {
+            if (__DEV__) {
+              console.log('TradingView chart loading started');
+            }
+          }}
+          onLoadEnd={() => {
+            if (__DEV__) {
+              console.log('TradingView chart loading completed');
+            }
+          }}
+          onMessage={(event) => {
+            if (__DEV__) {
+              console.log('TradingView message:', event.nativeEvent.data);
+            }
+          }}
+        />
+      </View>
+
+      {/* Full Screen Modal */}
+      <Modal
+        visible={isFullScreen}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => setIsFullScreen(false)}
+      >
+        <SafeAreaView style={styles.fullScreenContainer}>
+          <StatusBar hidden={true} />
+
+          {/* Full Screen Header */}
+          <View style={styles.fullScreenHeader}>
+            <View style={styles.headerContent}>
+              <Text style={styles.fullScreenTitle}>{symbol} Chart</Text>
+              <TouchableOpacity
+                style={styles.closeButton}
+                onPress={() => setIsFullScreen(false)}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="close" size={24} color="#ffffff" />
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* Full Screen Chart */}
+          <View style={styles.fullScreenChartContainer}>
+            <WebView
+              source={{ html: generateChartHTML(true) }}
+              style={styles.fullScreenWebView}
+              scrollEnabled={false}
+              javaScriptEnabled={true}
+              domStorageEnabled={true}
+              startInLoadingState={true}
+              originWhitelist={['*']}
+              mixedContentMode="compatibility"
+              allowsInlineMediaPlayback={true}
+              mediaPlaybackRequiresUserAction={false}
+              allowsBackForwardNavigationGestures={false}
+            />
+          </View>
+        </SafeAreaView>
+      </Modal>
+    </>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    width: '100%',
+    backgroundColor: 'transparent',
+    borderRadius: 8,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  webView: {
+    flex: 1,
+    backgroundColor: 'transparent',
+    borderRadius: 8,
+  },
+  compactContainer: {
+    marginVertical: 8,
+    borderRadius: 6,
+    borderWidth: 0.5,
+  },
+  fullScreenButton: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    zIndex: 10,
+    backgroundColor: 'rgba(0, 0, 0, 0.3)',
+    borderRadius: 6,
+    padding: 6,
+  },
+  fullScreenContainer: {
+    flex: 1,
+    backgroundColor: '#000000',
+  },
+  fullScreenHeader: {
+    backgroundColor: 'rgba(0, 0, 0, 0.9)',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#333333',
+  },
+  headerContent: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  fullScreenTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  closeButton: {
+    padding: 4,
+    borderRadius: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  fullScreenChartContainer: {
+    flex: 1,
+  },
+  fullScreenWebView: {
+    flex: 1,
+    backgroundColor: 'transparent',
+  },
+});

@@ -1,0 +1,574 @@
+/**
+ * Professional Positions Panel Component
+ * 
+ * Displays open positions with P&L tracking, position management,
+ * and advanced controls for professional trading.
+ */
+
+import React, { useState, useCallback } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  ScrollView,
+  ActivityIndicator,
+  Alert,
+  RefreshControl,
+} from 'react-native';
+import { colors, typography, spacing, components, getPnLColor } from '../../constants/theme';
+import { useTradingStore } from '@/stores/tradingStore';
+import { Position } from '@/services/futuresTrading.service';
+
+interface PositionsPanelProps {
+  isDarkMode?: boolean;
+  onPositionPress?: (position: Position) => void;
+  onClosePosition?: (positionId: string, symbol: string) => void;
+  showPnLChart?: boolean;
+  compact?: boolean;
+}
+
+export const PositionsPanel: React.FC<PositionsPanelProps> = ({
+  isDarkMode = false,
+  onPositionPress,
+  onClosePosition,
+  showPnLChart = true,
+  compact = false,
+}) => {
+  const {
+    positions,
+    loading,
+    refreshing,
+    refreshAll,
+    closePosition,
+  } = useTradingStore();
+
+  const [expandedPositions, setExpandedPositions] = useState<Set<string>>(new Set());
+  const [closingPositions, setClosingPositions] = useState<Set<string>>(new Set());
+
+  const formatCurrency = (amount: number, decimals = 2) => {
+    return amount.toLocaleString('en-US', {
+      style: 'currency',
+      currency: 'USD',
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals,
+    });
+  };
+
+  const formatPercentage = (value: number) => {
+    const sign = value >= 0 ? '+' : '';
+    return `${sign}${value.toFixed(2)}%`;
+  };
+
+  const togglePositionExpanded = useCallback((positionId: string) => {
+    setExpandedPositions(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(positionId)) {
+        newSet.delete(positionId);
+      } else {
+        newSet.add(positionId);
+      }
+      return newSet;
+    });
+  }, []);
+
+  const handleClosePosition = useCallback(async (position: Position) => {
+    const positionId = `${position.symbol}_${position.side}`;
+    
+    Alert.alert(
+      'Close Position',
+      `Are you sure you want to close your ${position.side.toUpperCase()} position in ${position.symbol}?\n\nCurrent P&L: ${formatCurrency(position.unrealizedPnl || 0)}`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Close Position',
+          style: 'destructive',
+          onPress: async () => {
+            setClosingPositions(prev => new Set([...prev, positionId]));
+            
+            try {
+              if (onClosePosition) {
+                await onClosePosition(positionId, position.symbol);
+              } else {
+                await closePosition(position.symbol);
+              }
+            } catch (error) {
+              console.error('Failed to close position:', error);
+              Alert.alert('Error', 'Failed to close position. Please try again.');
+            } finally {
+              setClosingPositions(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(positionId);
+                return newSet;
+              });
+            }
+          },
+        },
+      ]
+    );
+  }, [onClosePosition, closePosition]);
+
+  const calculateTotalPnL = useCallback(() => {
+    return positions.reduce((total, position) => {
+      return total + (position.unrealizedPnl || 0);
+    }, 0);
+  }, [positions]);
+
+  const renderPositionCard = (position: Position) => {
+    const positionId = `${position.symbol}_${position.side}`;
+    const isExpanded = expandedPositions.has(positionId);
+    const isClosing = closingPositions.has(positionId);
+    const pnlColor = getPnLColor(position.unrealizedPnl || 0, isDarkMode ? 'dark' : 'light');
+    const sideColor = position.side === 'long' ? colors.trading.long : colors.trading.short;
+
+    return (
+      <View
+        key={positionId}
+        style={[
+          styles.positionCard,
+          isDarkMode && styles.positionCardDark,
+          compact && styles.positionCardCompact,
+        ]}
+      >
+        {/* Position Header */}
+        <TouchableOpacity
+          style={styles.positionHeader}
+          onPress={() => {
+            if (onPositionPress) {
+              onPositionPress(position);
+            } else {
+              togglePositionExpanded(positionId);
+            }
+          }}
+          disabled={isClosing}
+        >
+          <View style={styles.positionHeaderLeft}>
+            <View style={styles.symbolAndSide}>
+              <Text style={[styles.positionSymbol, isDarkMode && styles.textDark]}>
+                {position.symbol.replace('USDT', '/USDT')}
+              </Text>
+              <View style={[styles.sideTag, { backgroundColor: sideColor }]}>
+                <Text style={styles.sideTagText}>
+                  {position.side.toUpperCase()}
+                </Text>
+              </View>
+            </View>
+            <Text style={[styles.positionSize, isDarkMode && styles.textSecondaryDark]}>
+              {position.size} @ {formatCurrency(position.entryPrice || 0)}
+            </Text>
+          </View>
+
+          <View style={styles.positionHeaderRight}>
+            <Text style={[styles.positionPnL, { color: pnlColor }]}>
+              {formatCurrency(position.unrealizedPnl || 0)}
+            </Text>
+            <Text style={[styles.positionPnLPercent, { color: pnlColor }]}>
+              {formatPercentage(position.percentage || 0)}
+            </Text>
+            {!compact && (
+              <Text style={[styles.expandIcon, isDarkMode && styles.textTertiaryDark]}>
+                {isExpanded ? '▲' : '▼'}
+              </Text>
+            )}
+          </View>
+        </TouchableOpacity>
+
+        {/* Expanded Details */}
+        {isExpanded && !compact && (
+          <View style={styles.positionDetails}>
+            <View style={styles.positionDetailsGrid}>
+              <View style={styles.detailItem}>
+                <Text style={[styles.detailLabel, isDarkMode && styles.textTertiaryDark]}>
+                  Entry Price
+                </Text>
+                <Text style={[styles.detailValue, isDarkMode && styles.textDark]}>
+                  {formatCurrency(position.entryPrice || 0)}
+                </Text>
+              </View>
+              <View style={styles.detailItem}>
+                <Text style={[styles.detailLabel, isDarkMode && styles.textTertiaryDark]}>
+                  Mark Price
+                </Text>
+                <Text style={[styles.detailValue, isDarkMode && styles.textDark]}>
+                  {formatCurrency(position.markPrice || 0)}
+                </Text>
+              </View>
+              <View style={styles.detailItem}>
+                <Text style={[styles.detailLabel, isDarkMode && styles.textTertiaryDark]}>
+                  Leverage
+                </Text>
+                <Text style={[styles.detailValue, isDarkMode && styles.textDark]}>
+                  {position.leverage}x
+                </Text>
+              </View>
+              <View style={styles.detailItem}>
+                <Text style={[styles.detailLabel, isDarkMode && styles.textTertiaryDark]}>
+                  Margin
+                </Text>
+                <Text style={[styles.detailValue, isDarkMode && styles.textDark]}>
+                  {formatCurrency(position.initialMargin || 0)}
+                </Text>
+              </View>
+              <View style={styles.detailItem}>
+                <Text style={[styles.detailLabel, isDarkMode && styles.textTertiaryDark]}>
+                  Liquidation Price
+                </Text>
+                <Text style={[styles.detailValue, styles.liquidationPrice, isDarkMode && styles.textDark]}>
+                  {formatCurrency(position.liquidationPrice || 0)}
+                </Text>
+              </View>
+              <View style={styles.detailItem}>
+                <Text style={[styles.detailLabel, isDarkMode && styles.textTertiaryDark]}>
+                  ROE
+                </Text>
+                <Text style={[styles.detailValue, { color: pnlColor }]}>
+                  {formatPercentage(position.roe || 0)}
+                </Text>
+              </View>
+            </View>
+
+            {/* Position Actions */}
+            <View style={styles.positionActions}>
+              <TouchableOpacity
+                style={[styles.actionButton, styles.closeButton]}
+                onPress={() => handleClosePosition(position)}
+                disabled={isClosing}
+              >
+                {isClosing ? (
+                  <ActivityIndicator size="small" color={colors.white} />
+                ) : (
+                  <Text style={styles.actionButtonText}>Close Position</Text>
+                )}
+              </TouchableOpacity>
+              
+              <TouchableOpacity
+                style={[styles.actionButton, styles.adjustButton, isDarkMode && styles.adjustButtonDark]}
+                disabled={isClosing}
+              >
+                <Text style={[styles.actionButtonTextSecondary, isDarkMode && styles.actionButtonTextSecondaryDark]}>
+                  Adjust
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+      </View>
+    );
+  };
+
+  const totalPnL = calculateTotalPnL();
+
+  if (loading && positions.length === 0) {
+    return (
+      <View style={[styles.container, isDarkMode && styles.containerDark]}>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color={colors.primary} />
+          <Text style={[styles.loadingText, isDarkMode && styles.textDark]}>
+            Loading positions...
+          </Text>
+        </View>
+      </View>
+    );
+  }
+
+  return (
+    <View style={[styles.container, isDarkMode && styles.containerDark, compact && styles.containerCompact]}>
+      {/* Panel Header */}
+      <View style={styles.header}>
+        <View style={styles.headerLeft}>
+          <Text style={[styles.title, isDarkMode && styles.textDark]}>
+            Open Positions ({positions.length})
+          </Text>
+          {!compact && totalPnL !== 0 && (
+            <Text style={[styles.totalPnL, { color: getPnLColor(totalPnL, isDarkMode ? 'dark' : 'light') }]}>
+              Total P&L: {formatCurrency(totalPnL)}
+            </Text>
+          )}
+        </View>
+        
+        <TouchableOpacity
+          style={[styles.refreshButton, isDarkMode && styles.refreshButtonDark]}
+          onPress={refreshAll}
+          disabled={loading}
+        >
+          {loading ? (
+            <ActivityIndicator size="small" color={colors.primary} />
+          ) : (
+            <Text style={styles.refreshButtonText}>↻</Text>
+          )}
+        </TouchableOpacity>
+      </View>
+
+      {/* Positions List */}
+      <ScrollView
+        style={styles.scrollView}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={refreshAll}
+            tintColor={isDarkMode ? colors.white : colors.primary}
+          />
+        }
+      >
+        {positions.length > 0 ? (
+          <View style={styles.positionsList}>
+            {positions.map(renderPositionCard)}
+          </View>
+        ) : (
+          <View style={styles.emptyState}>
+            <Text style={[styles.emptyStateText, isDarkMode && styles.textSecondaryDark]}>
+              No open positions
+            </Text>
+            <Text style={[styles.emptyStateSubtext, isDarkMode && styles.textTertiaryDark]}>
+              Your active trades will appear here
+            </Text>
+          </View>
+        )}
+      </ScrollView>
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    backgroundColor: colors.white,
+    borderRadius: components.tradingPanel.borderRadius,
+    ...components.tradingPanel.shadow,
+    margin: spacing.md,
+    marginVertical: spacing.sm,
+    maxHeight: 400,
+  },
+  containerDark: {
+    backgroundColor: '#161B22',
+  },
+  containerCompact: {
+    margin: spacing.sm,
+    maxHeight: 300,
+  },
+
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border.primary,
+  },
+  headerLeft: {
+    flex: 1,
+  },
+  title: {
+    fontSize: typography.fontSize.lg,
+    fontWeight: typography.fontWeight.semibold,
+    color: colors.text.primary,
+  },
+  totalPnL: {
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.medium,
+    marginTop: spacing.xs,
+    fontVariant: ['tabular-nums'],
+  },
+  refreshButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: colors.gray[100],
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  refreshButtonDark: {
+    backgroundColor: '#21262D',
+  },
+  refreshButtonText: {
+    fontSize: 16,
+  },
+
+  scrollView: {
+    flex: 1,
+  },
+
+  positionsList: {
+    padding: spacing.sm,
+    paddingTop: spacing.md,
+  },
+
+  positionCard: {
+    backgroundColor: colors.background.secondary,
+    borderRadius: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border.primary,
+    marginBottom: spacing.sm,
+    overflow: 'hidden',
+  },
+  positionCardDark: {
+    backgroundColor: '#21262D',
+    borderColor: '#30363D',
+  },
+  positionCardCompact: {
+    marginBottom: spacing.xs,
+  },
+
+  positionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: spacing.md,
+  },
+  positionHeaderLeft: {
+    flex: 1,
+  },
+  symbolAndSide: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.xs,
+  },
+  positionSymbol: {
+    fontSize: typography.fontSize.base,
+    fontWeight: typography.fontWeight.bold,
+    color: colors.text.primary,
+  },
+  sideTag: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    borderRadius: spacing.sm,
+  },
+  sideTagText: {
+    fontSize: typography.fontSize.xs,
+    fontWeight: typography.fontWeight.bold,
+    color: colors.white,
+  },
+  positionSize: {
+    fontSize: typography.fontSize.sm,
+    color: colors.text.secondary,
+    fontVariant: ['tabular-nums'],
+  },
+
+  positionHeaderRight: {
+    alignItems: 'flex-end',
+  },
+  positionPnL: {
+    fontSize: typography.fontSize.lg,
+    fontWeight: typography.fontWeight.bold,
+    fontVariant: ['tabular-nums'],
+  },
+  positionPnLPercent: {
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.medium,
+    fontVariant: ['tabular-nums'],
+  },
+  expandIcon: {
+    fontSize: typography.fontSize.sm,
+    color: colors.text.tertiary,
+    marginTop: spacing.xs,
+  },
+
+  positionDetails: {
+    borderTopWidth: 1,
+    borderTopColor: colors.border.primary,
+    padding: spacing.md,
+  },
+  positionDetailsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginBottom: spacing.md,
+  },
+  detailItem: {
+    width: '33.33%',
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+  },
+  detailLabel: {
+    fontSize: typography.fontSize.xs,
+    color: colors.text.tertiary,
+    marginBottom: spacing.xs,
+    textAlign: 'center',
+  },
+  detailValue: {
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.medium,
+    color: colors.text.primary,
+    textAlign: 'center',
+    fontVariant: ['tabular-nums'],
+  },
+  liquidationPrice: {
+    color: colors.warning,
+  },
+
+  positionActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  actionButton: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+    borderRadius: spacing.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  closeButton: {
+    backgroundColor: colors.danger,
+  },
+  adjustButton: {
+    backgroundColor: colors.gray[200],
+    borderWidth: 1,
+    borderColor: colors.border.primary,
+  },
+  adjustButtonDark: {
+    backgroundColor: '#30363D',
+    borderColor: '#30363D',
+  },
+  actionButtonText: {
+    color: colors.white,
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.semibold,
+  },
+  actionButtonTextSecondary: {
+    color: colors.text.primary,
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.semibold,
+  },
+  actionButtonTextSecondaryDark: {
+    color: '#F0F6FC',
+  },
+
+  emptyState: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: spacing.xxxl,
+  },
+  emptyStateText: {
+    fontSize: typography.fontSize.base,
+    fontWeight: typography.fontWeight.medium,
+    color: colors.text.secondary,
+    marginBottom: spacing.xs,
+  },
+  emptyStateSubtext: {
+    fontSize: typography.fontSize.sm,
+    color: colors.text.tertiary,
+  },
+
+  loadingContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: spacing.xxxl,
+    gap: spacing.md,
+  },
+  loadingText: {
+    fontSize: typography.fontSize.base,
+    color: colors.text.secondary,
+  },
+
+  // Dark mode text overrides
+  textDark: {
+    color: '#F0F6FC',
+  },
+  textSecondaryDark: {
+    color: '#C9D1D9',
+  },
+  textTertiaryDark: {
+    color: '#8B949E',
+  },
+});

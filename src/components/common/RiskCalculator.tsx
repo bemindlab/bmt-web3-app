@@ -1,0 +1,867 @@
+/**
+ * Professional Risk/Reward Calculator Component
+ * 
+ * Advanced position sizing and risk management calculator for professional trading.
+ * Provides real-time risk analysis, position sizing recommendations, and P&L projections.
+ */
+
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  StyleSheet,
+  ScrollView,
+  Switch,
+} from 'react-native';
+import { colors, typography, spacing, components, getRiskColor } from '../../constants/theme';
+import { useTradingBalance } from '../../hooks';
+
+interface RiskCalculatorProps {
+  symbol: string;
+  currentPrice?: number;
+  isDarkMode?: boolean;
+  onCalculationChange?: (calculation: RiskCalculation) => void;
+  showAdvancedMetrics?: boolean;
+  compact?: boolean;
+}
+
+interface RiskCalculation {
+  // Input parameters
+  accountBalance: number;
+  riskPercentage: number;
+  entryPrice: number;
+  stopLoss: number;
+  takeProfit: number;
+  leverage: number;
+
+  // Calculated values
+  positionSize: number;
+  marginRequired: number;
+  maxLoss: number;
+  maxGain: number;
+  riskRewardRatio: number;
+  liquidationPrice: number;
+  
+  // Advanced metrics
+  breakEvenPrice: number;
+  probabilityOfProfit: number;
+  kellyPercentage: number;
+  valueAtRisk: number;
+  
+  // Risk assessment
+  riskLevel: 'minimal' | 'low' | 'medium' | 'high' | 'critical' | 'extreme';
+  warnings: string[];
+  recommendations: string[];
+  
+  // P&L scenarios
+  scenarios: {
+    conservative: number;
+    realistic: number;
+    optimistic: number;
+  };
+}
+
+const RISK_PRESETS = {
+  conservative: { risk: 1, leverage: 5 },
+  balanced: { risk: 2, leverage: 10 },
+  aggressive: { risk: 5, leverage: 20 },
+  expert: { risk: 10, leverage: 50 },
+} as const;
+
+export const RiskCalculator: React.FC<RiskCalculatorProps> = ({
+  symbol,
+  currentPrice = 0,
+  isDarkMode = false,
+  onCalculationChange,
+  showAdvancedMetrics = true,
+  compact = false,
+}) => {
+  const { portfolioValue } = useTradingBalance();
+
+  const [inputs, setInputs] = useState({
+    accountBalance: portfolioValue.total || 10000,
+    riskPercentage: 2,
+    entryPrice: currentPrice,
+    stopLoss: currentPrice * 0.95,
+    takeProfit: currentPrice * 1.1,
+    leverage: 10,
+  });
+
+  const [autoCalculateStops, setAutoCalculateStops] = useState(true);
+  const [selectedPreset, setSelectedPreset] = useState<keyof typeof RISK_PRESETS | null>(null);
+
+  // Update entry price when current price changes
+  useEffect(() => {
+    if (currentPrice > 0 && inputs.entryPrice === 0) {
+      setInputs(prev => ({
+        ...prev,
+        entryPrice: currentPrice,
+      }));
+    }
+  }, [currentPrice, inputs.entryPrice]);
+
+  // Auto-calculate stop loss and take profit
+  useEffect(() => {
+    if (autoCalculateStops && inputs.entryPrice > 0) {
+      const stopLossDistance = inputs.entryPrice * 0.05; // 5% default
+      const takeProfitDistance = inputs.entryPrice * 0.1; // 10% default
+      
+      setInputs(prev => ({
+        ...prev,
+        stopLoss: prev.entryPrice - stopLossDistance,
+        takeProfit: prev.entryPrice + takeProfitDistance,
+      }));
+    }
+  }, [autoCalculateStops, inputs.entryPrice]);
+
+  const calculation = useMemo((): RiskCalculation => {
+    const { accountBalance, riskPercentage, entryPrice, stopLoss, takeProfit, leverage } = inputs;
+
+    // Basic validations
+    if (!entryPrice || !stopLoss || !takeProfit || !accountBalance) {
+      return {
+        ...inputs,
+        positionSize: 0,
+        marginRequired: 0,
+        maxLoss: 0,
+        maxGain: 0,
+        riskRewardRatio: 0,
+        liquidationPrice: 0,
+        breakEvenPrice: entryPrice,
+        probabilityOfProfit: 50,
+        kellyPercentage: 0,
+        valueAtRisk: 0,
+        riskLevel: 'medium',
+        warnings: ['Invalid input parameters'],
+        recommendations: [],
+        scenarios: { conservative: 0, realistic: 0, optimistic: 0 },
+      };
+    }
+
+    // Risk calculations
+    const riskAmount = (accountBalance * riskPercentage) / 100;
+    const stopLossDistance = Math.abs(entryPrice - stopLoss);
+    const takeProfitDistance = Math.abs(takeProfit - entryPrice);
+    
+    // Position size based on risk
+    const positionSize = riskAmount / stopLossDistance;
+    const positionValue = positionSize * entryPrice;
+    const marginRequired = positionValue / leverage;
+    
+    // Max loss and gain
+    const maxLoss = positionSize * stopLossDistance;
+    const maxGain = positionSize * takeProfitDistance;
+    const riskRewardRatio = takeProfitDistance / stopLossDistance;
+    
+    // Liquidation price (simplified calculation)
+    const maintenanceMarginRate = 0.005; // 0.5% typical maintenance margin
+    const liquidationPrice = entryPrice * (1 - (1 / leverage) + maintenanceMarginRate);
+    
+    // Break-even price including fees
+    const tradingFee = 0.0006; // 0.06% typical fee
+    const feeAmount = positionValue * tradingFee * 2; // Round trip
+    const breakEvenPrice = entryPrice + (feeAmount / positionSize);
+    
+    // Advanced metrics
+    const probabilityOfProfit = Math.min(Math.max(riskRewardRatio / (1 + riskRewardRatio) * 100, 20), 80);
+    const kellyPercentage = ((probabilityOfProfit / 100 * (1 + riskRewardRatio)) - (1 - probabilityOfProfit / 100)) * 100;
+    const valueAtRisk = positionValue * 0.05; // 5% VaR
+    
+    // Risk level assessment
+    let riskLevel: RiskCalculation['riskLevel'] = 'medium';
+    if (riskPercentage <= 1) riskLevel = 'minimal';
+    else if (riskPercentage <= 2) riskLevel = 'low';
+    else if (riskPercentage <= 5) riskLevel = 'medium';
+    else if (riskPercentage <= 10) riskLevel = 'high';
+    else if (riskPercentage <= 20) riskLevel = 'critical';
+    else riskLevel = 'extreme';
+    
+    // Warnings and recommendations
+    const warnings: string[] = [];
+    const recommendations: string[] = [];
+    
+    if (leverage > 20) warnings.push('High leverage increases liquidation risk');
+    if (riskRewardRatio < 1.5) warnings.push('Risk/reward ratio below recommended 1.5:1');
+    if (marginRequired > accountBalance * 0.8) warnings.push('Position size too large for account');
+    if (liquidationPrice > stopLoss * 0.9) warnings.push('Liquidation price close to stop loss');
+    
+    if (riskRewardRatio >= 2) recommendations.push('Good risk/reward ratio');
+    if (kellyPercentage > 0 && kellyPercentage < 25) recommendations.push('Kelly percentage suggests optimal sizing');
+    if (marginRequired < accountBalance * 0.3) recommendations.push('Conservative position sizing');
+    
+    // P&L scenarios
+    const scenarios = {
+      conservative: maxGain * 0.3, // 30% of max gain
+      realistic: maxGain * 0.6, // 60% of max gain
+      optimistic: maxGain, // Full take profit
+    };
+
+    return {
+      ...inputs,
+      positionSize,
+      marginRequired,
+      maxLoss,
+      maxGain,
+      riskRewardRatio,
+      liquidationPrice,
+      breakEvenPrice,
+      probabilityOfProfit,
+      kellyPercentage,
+      valueAtRisk,
+      riskLevel,
+      warnings,
+      recommendations,
+      scenarios,
+    };
+  }, [inputs]);
+
+  // Notify parent component of calculation changes
+  useEffect(() => {
+    if (onCalculationChange) {
+      onCalculationChange(calculation);
+    }
+  }, [calculation, onCalculationChange]);
+
+  const updateInput = useCallback((field: keyof typeof inputs, value: number) => {
+    setInputs(prev => ({ ...prev, [field]: value }));
+    setSelectedPreset(null); // Clear preset selection when manually changing values
+  }, []);
+
+  const applyPreset = useCallback((preset: keyof typeof RISK_PRESETS) => {
+    const presetValues = RISK_PRESETS[preset];
+    setInputs(prev => ({
+      ...prev,
+      riskPercentage: presetValues.risk,
+      leverage: presetValues.leverage,
+    }));
+    setSelectedPreset(preset);
+  }, []);
+
+  const formatCurrency = (amount: number) => {
+    return amount.toLocaleString('en-US', {
+      style: 'currency',
+      currency: 'USD',
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+  };
+
+  const formatPercentage = (value: number) => {
+    return `${value.toFixed(2)}%`;
+  };
+
+  const renderInputField = (
+    label: string,
+    value: number,
+    onChangeValue: (value: number) => void,
+    suffix?: string,
+    _isPrice = false
+  ) => (
+    <View style={styles.inputGroup}>
+      <Text style={[styles.inputLabel, isDarkMode && styles.textDark]}>
+        {label}
+      </Text>
+      <TextInput
+        style={[
+          styles.input,
+          isDarkMode && styles.inputDark,
+        ]}
+        value={value.toString()}
+        onChangeText={(text) => {
+          const numValue = parseFloat(text) || 0;
+          onChangeValue(numValue);
+        }}
+        keyboardType="numeric"
+        placeholder="0.00"
+        placeholderTextColor={isDarkMode ? '#6E7681' : colors.text.placeholder}
+      />
+      {suffix && (
+        <Text style={[styles.inputSuffix, isDarkMode && styles.textTertiaryDark]}>
+          {suffix}
+        </Text>
+      )}
+    </View>
+  );
+
+  const renderMetricCard = (
+    title: string,
+    value: string,
+    color?: string,
+    subtitle?: string
+  ) => (
+    <View style={[styles.metricCard, isDarkMode && styles.metricCardDark]}>
+      <Text style={[styles.metricTitle, isDarkMode && styles.textTertiaryDark]}>
+        {title}
+      </Text>
+      <Text
+        style={[
+          styles.metricValue,
+          color && { color },
+          isDarkMode && !color && styles.textDark,
+        ]}
+      >
+        {value}
+      </Text>
+      {subtitle && (
+        <Text style={[styles.metricSubtitle, isDarkMode && styles.textTertiaryDark]}>
+          {subtitle}
+        </Text>
+      )}
+    </View>
+  );
+
+  if (compact) {
+    return (
+      <View style={[styles.container, styles.containerCompact, isDarkMode && styles.containerDark]}>
+        <View style={styles.compactHeader}>
+          <Text style={[styles.title, isDarkMode && styles.textDark]}>
+            Risk Calculator
+          </Text>
+        </View>
+        <View style={styles.compactMetrics}>
+          {renderMetricCard(
+            'Position Size',
+            formatCurrency(calculation.positionSize * inputs.entryPrice),
+            undefined,
+            `${calculation.positionSize.toFixed(4)} ${symbol.replace('USDT', '')}`
+          )}
+          {renderMetricCard(
+            'Max Loss',
+            formatCurrency(calculation.maxLoss),
+            colors.danger,
+            `${formatPercentage(inputs.riskPercentage)}`
+          )}
+          {renderMetricCard(
+            'R:R Ratio',
+            `1:${calculation.riskRewardRatio.toFixed(2)}`,
+            calculation.riskRewardRatio >= 2 ? colors.success : colors.warning
+          )}
+        </View>
+      </View>
+    );
+  }
+
+  return (
+    <View style={[styles.container, isDarkMode && styles.containerDark]}>
+      <ScrollView showsVerticalScrollIndicator={false}>
+        {/* Header */}
+        <View style={styles.header}>
+          <Text style={[styles.title, isDarkMode && styles.textDark]}>
+            Risk/Reward Calculator
+          </Text>
+          <Text style={[styles.subtitle, isDarkMode && styles.textSecondaryDark]}>
+            {symbol.replace('USDT', '/USDT')}
+          </Text>
+        </View>
+
+        {/* Risk Presets */}
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, isDarkMode && styles.textDark]}>
+            Risk Presets
+          </Text>
+          <View style={styles.presetButtons}>
+            {Object.entries(RISK_PRESETS).map(([key, preset]) => (
+              <TouchableOpacity
+                key={key}
+                style={[
+                  styles.presetButton,
+                  selectedPreset === key && styles.presetButtonSelected,
+                  isDarkMode && styles.presetButtonDark,
+                ]}
+                onPress={() => applyPreset(key as keyof typeof RISK_PRESETS)}
+              >
+                <Text
+                  style={[
+                    styles.presetButtonText,
+                    selectedPreset === key && styles.presetButtonTextSelected,
+                    isDarkMode && styles.presetButtonTextDark,
+                  ]}
+                >
+                  {key.charAt(0).toUpperCase() + key.slice(1)}
+                </Text>
+                <Text
+                  style={[
+                    styles.presetButtonSubtext,
+                    selectedPreset === key && styles.presetButtonSubtextSelected,
+                    isDarkMode && styles.presetButtonSubtextDark,
+                  ]}
+                >
+                  {preset.risk}% • {preset.leverage}x
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+
+        {/* Input Parameters */}
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, isDarkMode && styles.textDark]}>
+            Parameters
+          </Text>
+          
+          <View style={styles.inputGrid}>
+            {renderInputField(
+              'Account Balance',
+              inputs.accountBalance,
+              (value) => updateInput('accountBalance', value),
+              'USDT',
+              true
+            )}
+            {renderInputField(
+              'Risk %',
+              inputs.riskPercentage,
+              (value) => updateInput('riskPercentage', value),
+              '%'
+            )}
+            {renderInputField(
+              'Entry Price',
+              inputs.entryPrice,
+              (value) => updateInput('entryPrice', value),
+              'USDT',
+              true
+            )}
+            {renderInputField(
+              'Stop Loss',
+              inputs.stopLoss,
+              (value) => updateInput('stopLoss', value),
+              'USDT',
+              true
+            )}
+            {renderInputField(
+              'Take Profit',
+              inputs.takeProfit,
+              (value) => updateInput('takeProfit', value),
+              'USDT',
+              true
+            )}
+            {renderInputField(
+              'Leverage',
+              inputs.leverage,
+              (value) => updateInput('leverage', value),
+              'x'
+            )}
+          </View>
+
+          <View style={styles.switchRow}>
+            <Text style={[styles.switchLabel, isDarkMode && styles.textDark]}>
+              Auto-calculate stops
+            </Text>
+            <Switch
+              value={autoCalculateStops}
+              onValueChange={setAutoCalculateStops}
+              trackColor={{ false: '#767577', true: colors.primary }}
+            />
+          </View>
+        </View>
+
+        {/* Risk Assessment */}
+        <View style={[styles.riskAssessment, { backgroundColor: getRiskColor(calculation.riskLevel) + '20' }]}>
+          <View style={styles.riskHeader}>
+            <Text style={[styles.riskTitle, { color: getRiskColor(calculation.riskLevel) }]}>
+              Risk Level: {calculation.riskLevel.toUpperCase()}
+            </Text>
+            <View style={[
+              styles.riskIndicator,
+              { backgroundColor: getRiskColor(calculation.riskLevel) }
+            ]} />
+          </View>
+        </View>
+
+        {/* Key Metrics */}
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, isDarkMode && styles.textDark]}>
+            Key Metrics
+          </Text>
+          <View style={styles.metricsGrid}>
+            {renderMetricCard(
+              'Position Size',
+              `${calculation.positionSize.toFixed(4)} ${symbol.replace('USDT', '')}`,
+              undefined,
+              formatCurrency(calculation.positionSize * inputs.entryPrice)
+            )}
+            {renderMetricCard(
+              'Margin Required',
+              formatCurrency(calculation.marginRequired),
+              undefined,
+              `${((calculation.marginRequired / inputs.accountBalance) * 100).toFixed(1)}% of balance`
+            )}
+            {renderMetricCard(
+              'Max Loss',
+              formatCurrency(calculation.maxLoss),
+              colors.danger,
+              `${formatPercentage(inputs.riskPercentage)}`
+            )}
+            {renderMetricCard(
+              'Max Gain',
+              formatCurrency(calculation.maxGain),
+              colors.success,
+              `${formatPercentage((calculation.maxGain / inputs.accountBalance) * 100)}`
+            )}
+            {renderMetricCard(
+              'R:R Ratio',
+              `1:${calculation.riskRewardRatio.toFixed(2)}`,
+              calculation.riskRewardRatio >= 2 ? colors.success : colors.warning
+            )}
+            {renderMetricCard(
+              'Liquidation Price',
+              formatCurrency(calculation.liquidationPrice),
+              colors.warning,
+              `${((1 - calculation.liquidationPrice / inputs.entryPrice) * 100).toFixed(1)}% down`
+            )}
+          </View>
+        </View>
+
+        {/* Advanced Metrics */}
+        {showAdvancedMetrics && (
+          <View style={styles.section}>
+            <Text style={[styles.sectionTitle, isDarkMode && styles.textDark]}>
+              Advanced Analytics
+            </Text>
+            <View style={styles.metricsGrid}>
+              {renderMetricCard(
+                'Break-even Price',
+                formatCurrency(calculation.breakEvenPrice),
+                undefined,
+                'Including fees'
+              )}
+              {renderMetricCard(
+                'Probability of Profit',
+                formatPercentage(calculation.probabilityOfProfit),
+                calculation.probabilityOfProfit > 60 ? colors.success : colors.warning
+              )}
+              {renderMetricCard(
+                'Kelly %',
+                formatPercentage(Math.max(0, calculation.kellyPercentage)),
+                calculation.kellyPercentage > 0 ? colors.success : colors.danger,
+                'Optimal sizing'
+              )}
+              {renderMetricCard(
+                'Value at Risk',
+                formatCurrency(calculation.valueAtRisk),
+                colors.info,
+                '95% confidence'
+              )}
+            </View>
+          </View>
+        )}
+
+        {/* P&L Scenarios */}
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, isDarkMode && styles.textDark]}>
+            P&L Scenarios
+          </Text>
+          <View style={styles.scenariosContainer}>
+            {Object.entries(calculation.scenarios).map(([scenario, value]) => (
+              <View key={scenario} style={[styles.scenarioCard, isDarkMode && styles.scenarioCardDark]}>
+                <Text style={[styles.scenarioTitle, isDarkMode && styles.textDark]}>
+                  {scenario.charAt(0).toUpperCase() + scenario.slice(1)}
+                </Text>
+                <Text style={[styles.scenarioValue, { color: value >= 0 ? colors.success : colors.danger }]}>
+                  {formatCurrency(value)}
+                </Text>
+              </View>
+            ))}
+          </View>
+        </View>
+
+        {/* Warnings and Recommendations */}
+        {(calculation.warnings.length > 0 || calculation.recommendations.length > 0) && (
+          <View style={styles.section}>
+            {calculation.warnings.length > 0 && (
+              <View style={styles.alertContainer}>
+                <Text style={styles.alertTitle}>⚠️ Warnings</Text>
+                {calculation.warnings.map((warning, index) => (
+                  <Text key={index} style={styles.warningText}>
+                    • {warning}
+                  </Text>
+                ))}
+              </View>
+            )}
+            
+            {calculation.recommendations.length > 0 && (
+              <View style={[styles.alertContainer, styles.recommendationContainer]}>
+                <Text style={[styles.alertTitle, styles.recommendationTitle]}>💡 Recommendations</Text>
+                {calculation.recommendations.map((recommendation, index) => (
+                  <Text key={index} style={styles.recommendationText}>
+                    • {recommendation}
+                  </Text>
+                ))}
+              </View>
+            )}
+          </View>
+        )}
+      </ScrollView>
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    backgroundColor: colors.white,
+    borderRadius: components.tradingPanel.borderRadius,
+    padding: components.tradingPanel.padding,
+    ...components.tradingPanel.shadow,
+    margin: spacing.md,
+    marginVertical: spacing.sm,
+  },
+  containerDark: {
+    backgroundColor: '#161B22',
+  },
+  containerCompact: {
+    margin: spacing.sm,
+    padding: spacing.sm,
+  },
+
+  header: {
+    marginBottom: spacing.lg,
+  },
+  title: {
+    fontSize: typography.fontSize.xl,
+    fontWeight: typography.fontWeight.bold,
+    color: colors.text.primary,
+  },
+  subtitle: {
+    fontSize: typography.fontSize.base,
+    color: colors.text.secondary,
+    marginTop: spacing.xs,
+  },
+
+  compactHeader: {
+    marginBottom: spacing.md,
+  },
+  compactMetrics: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+
+  section: {
+    marginBottom: spacing.lg,
+  },
+  sectionTitle: {
+    fontSize: typography.fontSize.lg,
+    fontWeight: typography.fontWeight.semibold,
+    color: colors.text.primary,
+    marginBottom: spacing.md,
+  },
+
+  presetButtons: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  presetButton: {
+    flex: 1,
+    minWidth: '22%',
+    backgroundColor: colors.gray[100],
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderRadius: spacing.md,
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: 'transparent',
+  },
+  presetButtonDark: {
+    backgroundColor: '#21262D',
+  },
+  presetButtonSelected: {
+    backgroundColor: colors.primary + '20',
+    borderColor: colors.primary,
+  },
+  presetButtonText: {
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.semibold,
+    color: colors.text.primary,
+  },
+  presetButtonTextDark: {
+    color: '#F0F6FC',
+  },
+  presetButtonTextSelected: {
+    color: colors.primary,
+  },
+  presetButtonSubtext: {
+    fontSize: typography.fontSize.xs,
+    color: colors.text.tertiary,
+    marginTop: spacing.xs,
+  },
+  presetButtonSubtextDark: {
+    color: '#8B949E',
+  },
+  presetButtonSubtextSelected: {
+    color: colors.primary,
+  },
+
+  inputGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.md,
+    marginBottom: spacing.md,
+  },
+  inputGroup: {
+    flex: 1,
+    minWidth: '45%',
+    position: 'relative',
+  },
+  inputLabel: {
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.medium,
+    color: colors.text.primary,
+    marginBottom: spacing.sm,
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: colors.border.primary,
+    borderRadius: spacing.md,
+    padding: spacing.md,
+    fontSize: typography.fontSize.base,
+    color: colors.text.primary,
+    backgroundColor: colors.background.primary,
+  },
+  inputDark: {
+    borderColor: '#30363D',
+    backgroundColor: '#21262D',
+    color: '#F0F6FC',
+  },
+  inputSuffix: {
+    position: 'absolute',
+    right: spacing.md,
+    top: '50%',
+    fontSize: typography.fontSize.sm,
+    color: colors.text.tertiary,
+  },
+
+  switchRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  switchLabel: {
+    fontSize: typography.fontSize.base,
+    color: colors.text.primary,
+  },
+
+  riskAssessment: {
+    borderRadius: spacing.md,
+    padding: spacing.md,
+    marginBottom: spacing.lg,
+  },
+  riskHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  riskTitle: {
+    fontSize: typography.fontSize.base,
+    fontWeight: typography.fontWeight.bold,
+  },
+  riskIndicator: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+  },
+
+  metricsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  metricCard: {
+    flex: 1,
+    minWidth: '30%',
+    backgroundColor: colors.gray[50],
+    borderRadius: spacing.md,
+    padding: spacing.md,
+    alignItems: 'center',
+  },
+  metricCardDark: {
+    backgroundColor: '#0D1117',
+  },
+  metricTitle: {
+    fontSize: typography.fontSize.xs,
+    color: colors.text.tertiary,
+    marginBottom: spacing.xs,
+    textAlign: 'center',
+  },
+  metricValue: {
+    fontSize: typography.fontSize.base,
+    fontWeight: typography.fontWeight.bold,
+    color: colors.text.primary,
+    textAlign: 'center',
+    fontVariant: ['tabular-nums'],
+  },
+  metricSubtitle: {
+    fontSize: typography.fontSize.xs,
+    color: colors.text.tertiary,
+    marginTop: spacing.xs,
+    textAlign: 'center',
+  },
+
+  scenariosContainer: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  scenarioCard: {
+    flex: 1,
+    backgroundColor: colors.gray[50],
+    borderRadius: spacing.md,
+    padding: spacing.md,
+    alignItems: 'center',
+  },
+  scenarioCardDark: {
+    backgroundColor: '#0D1117',
+  },
+  scenarioTitle: {
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.medium,
+    color: colors.text.primary,
+    marginBottom: spacing.sm,
+  },
+  scenarioValue: {
+    fontSize: typography.fontSize.lg,
+    fontWeight: typography.fontWeight.bold,
+    fontVariant: ['tabular-nums'],
+  },
+
+  alertContainer: {
+    backgroundColor: colors.warning + '20',
+    borderRadius: spacing.md,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+  },
+  recommendationContainer: {
+    backgroundColor: colors.success + '20',
+  },
+  alertTitle: {
+    fontSize: typography.fontSize.base,
+    fontWeight: typography.fontWeight.semibold,
+    color: colors.warning,
+    marginBottom: spacing.sm,
+  },
+  recommendationTitle: {
+    color: colors.success,
+  },
+  warningText: {
+    fontSize: typography.fontSize.sm,
+    color: colors.warning,
+    marginBottom: spacing.xs,
+    lineHeight: typography.fontSize.sm * 1.4,
+  },
+  recommendationText: {
+    fontSize: typography.fontSize.sm,
+    color: colors.success,
+    marginBottom: spacing.xs,
+    lineHeight: typography.fontSize.sm * 1.4,
+  },
+
+  // Dark mode text overrides
+  textDark: {
+    color: '#F0F6FC',
+  },
+  textSecondaryDark: {
+    color: '#C9D1D9',
+  },
+  textTertiaryDark: {
+    color: '#8B949E',
+  },
+});

@@ -1,0 +1,898 @@
+import * as SecureStore from 'expo-secure-store';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+// UPDATED: [HIGH] - [2025-09-01] - Claude Code
+// Replaced custom exchangeApiService with CCXT-based implementation
+// This provides battle-tested exchange integrations with unified API
+import ccxtExchangeService from './ccxtExchange.service';
+import type { ExchangeCredentials as CCXTCredentials } from './ccxtExchange.service';
+
+const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL || 'http://localhost:4002/api';
+
+export interface ExchangeCredentials {
+  exchange: 'binance' | 'gate';
+  apiKey: string;
+  apiSecret: string;
+}
+
+export interface Position {
+  id: string;
+  exchange: string;
+  symbol: string;
+  side: 'long' | 'short';
+  entryPrice: number;
+  markPrice: number;
+  unrealizedPnl: number;
+  realizedPnl: number;
+  contracts: number;
+  leverage: number;
+  liquidationPrice: number;
+  margin: number;
+  percentage: number;
+  timestamp: number;
+}
+
+export interface AccountBalance {
+  exchange: string;
+  asset: string;
+  free: number;
+  used: number;
+  total: number;
+  availableMargin: number;
+  maintMargin: number;
+  marginBalance: number;
+  unrealizedPnl: number;
+  realizedPnl: number;
+  timestamp: number;
+}
+
+export interface MarketData {
+  symbol: string;
+  bid: number;
+  ask: number;
+  last: number;
+  volume24h: number;
+  change24h: number;
+  high24h: number;
+  low24h: number;
+  timestamp: number;
+}
+
+export interface TradingOrder {
+  exchange: 'binance' | 'gate';
+  symbol: string;
+  side: 'buy' | 'sell';
+  amount: number;
+  leverage?: number;
+  stopLoss?: number;
+  takeProfit?: number;
+}
+
+class FuturesTradingService {
+  private token: string | null = null;
+
+  async setAuthToken(token: string) {
+    this.token = token;
+    await AsyncStorage.setItem('authToken', token);
+  }
+
+  async getAuthToken(): Promise<string | null> {
+    if (!this.token) {
+      this.token = await AsyncStorage.getItem('authToken');
+    }
+    return this.token;
+  }
+
+  private async makeRequest(endpoint: string, options: RequestInit = {}) {
+    const token = await this.getAuthToken();
+
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: token ? `Bearer ${token}` : '',
+        ...options.headers,
+      },
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ message: 'Request failed' }));
+      throw new Error(error.message || `HTTP ${response.status}`);
+    }
+
+    return response.json();
+  }
+
+  // Store encrypted credentials locally
+  async saveExchangeCredentials(credentials: ExchangeCredentials): Promise<void> {
+    const key = `exchange_${credentials.exchange}_credentials`;
+    await SecureStore.setItemAsync(
+      key,
+      JSON.stringify({
+        apiKey: credentials.apiKey,
+        apiSecret: credentials.apiSecret,
+      })
+    );
+  }
+
+  // Retrieve stored credentials
+  async getExchangeCredentials(exchange: 'binance' | 'gate'): Promise<ExchangeCredentials | null> {
+    try {
+      const key = `exchange_${exchange}_credentials`;
+      const stored = await SecureStore.getItemAsync(key);
+
+      if (!stored) return null;
+
+      const credentials = JSON.parse(stored);
+      return {
+        exchange,
+        ...credentials,
+      };
+    } catch (error) {
+      console.error('Failed to retrieve credentials:', error);
+      return null;
+    }
+  }
+
+  // Clear stored credentials
+  async clearExchangeCredentials(exchange: 'binance' | 'gate'): Promise<void> {
+    const key = `exchange_${exchange}_credentials`;
+    await SecureStore.deleteItemAsync(key);
+  }
+
+  // Initialize exchange connection using CCXT
+  // UPDATED: [HIGH] - [2025-09-01] - Claude Code
+  // Replaced custom API validation with CCXT unified connection testing
+  // This provides reliable authentication and signature generation
+  async initializeExchange(
+    credentials: ExchangeCredentials
+  ): Promise<{ success: boolean; message: string }> {
+    try {
+      console.log(`🔌 Initializing ${credentials.exchange} connection with CCXT...`);
+
+      // Validate credentials format using CCXT service
+      const validation = ccxtExchangeService.validateCredentials({
+        exchange: credentials.exchange,
+        apiKey: credentials.apiKey,
+        apiSecret: credentials.apiSecret,
+      });
+
+      if (!validation.isValid) {
+        return {
+          success: false,
+          message: validation.error || 'Invalid credentials format',
+        };
+      }
+
+      // Test actual connection using CCXT
+      const connectionTest = await ccxtExchangeService.testConnection({
+        exchange: credentials.exchange,
+        apiKey: credentials.apiKey,
+        apiSecret: credentials.apiSecret,
+        testnet: false, // Always use live trading
+      });
+
+      if (connectionTest.success) {
+        // Save credentials if connection is successful
+        await this.saveExchangeCredentials(credentials);
+        console.log(`✅ Successfully connected to ${credentials.exchange} via CCXT`);
+
+        return {
+          success: true,
+          message: connectionTest.message + ' (CCXT Integration)',
+        };
+      } else {
+        console.error(
+          `❌ CCXT connection failed for ${credentials.exchange}:`,
+          connectionTest.error
+        );
+
+        return {
+          success: false,
+          message: `${credentials.exchange} connection failed: ${connectionTest.error}`,
+        };
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to initialize exchange';
+      console.error(`💥 Exception in initializeExchange:`, errorMessage);
+
+      return {
+        success: false,
+        message: errorMessage,
+      };
+    }
+  }
+
+  // Get spot balance using CCXT
+  // UPDATED: [MEDIUM] - [2025-09-01] - Claude Code
+  // Replaced custom balance fetching with CCXT unified balance API
+  async getSpotBalance(exchange: 'binance' | 'gate'): Promise<any> {
+    const credentials = await this.getExchangeCredentials(exchange);
+
+    if (!credentials) {
+      throw new Error(`Not connected to ${exchange}`);
+    }
+
+    try {
+      console.log(`📊 Fetching spot balance from ${exchange} via CCXT...`);
+
+      // Use CCXT for balance fetching
+      const result = await ccxtExchangeService.getBalance(
+        {
+          exchange: credentials.exchange,
+          apiKey: credentials.apiKey,
+          apiSecret: credentials.apiSecret,
+        },
+        'spot'
+      );
+
+      if (!result.success) {
+        console.error(`❌ Failed to fetch spot balance from ${exchange}:`, result.error);
+        return {
+          success: false,
+          error: result.error,
+        };
+      }
+
+      console.log(`✅ Successfully fetched spot balance from ${exchange}`);
+      return {
+        success: true,
+        data: result.data,
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to fetch spot balance';
+      console.error(`💥 Exception in getSpotBalance:`, errorMessage);
+
+      return {
+        success: false,
+        error: errorMessage,
+      };
+    }
+  }
+
+  // Get account balance (futures) using CCXT
+  // UPDATED: [MEDIUM] - [2025-09-01] - Claude Code
+  // Replaced custom futures balance fetching with CCXT unified API
+  async getAccountBalance(exchange: 'binance' | 'gate'): Promise<AccountBalance> {
+    const credentials = await this.getExchangeCredentials(exchange);
+
+    if (!credentials) {
+      throw new Error(`Not connected to ${exchange}`);
+    }
+
+    try {
+      console.log(`📊 Fetching futures balance from ${exchange} via CCXT...`);
+
+      // Use CCXT for futures balance fetching
+      const result = await ccxtExchangeService.getBalance(
+        {
+          exchange: credentials.exchange,
+          apiKey: credentials.apiKey,
+          apiSecret: credentials.apiSecret,
+        },
+        'futures'
+      );
+
+      if (!result.success) {
+        const errorMessage = `Unable to fetch balance from ${exchange}: ${result.error}`;
+        console.error(`❌ ${errorMessage}`);
+        throw new Error(errorMessage);
+      }
+
+      console.log(`✅ Successfully fetched futures balance from ${exchange}`);
+
+      // Transform CCXT response to our AccountBalance format
+      const data = result.data!;
+      return {
+        exchange,
+        asset: data.asset,
+        free: data.availableBalance,
+        used: data.marginBalance || 0,
+        total: data.balance,
+        availableMargin: data.availableBalance,
+        maintMargin: 0, // Would need additional API call for maintenance margin
+        marginBalance: data.marginBalance || 0,
+        unrealizedPnl: data.unrealizedPnl || 0,
+        realizedPnl: 0, // Would need additional API call for realized PnL
+        timestamp: data.timestamp,
+      };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : `Failed to fetch ${exchange} balance`;
+      console.error(`💥 Exception in getAccountBalance:`, errorMessage);
+      throw new Error(errorMessage);
+    }
+  }
+
+  // Get all positions
+  async getAllPositions(): Promise<Position[]> {
+    return this.makeRequest('/futures-trading/positions');
+  }
+
+  // Get positions for specific exchange using CCXT
+  // UPDATED: [HIGH] - [2025-09-01] - Claude Code
+  // Replaced custom position fetching with CCXT unified positions API
+  // This provides reliable position data with proper authentication
+  async getPositions(exchange: 'binance' | 'gate', symbol?: string): Promise<Position[]> {
+    const credentials = await this.getExchangeCredentials(exchange);
+
+    if (!credentials) {
+      console.warn(`⚠️ No credentials found for ${exchange}`);
+      return [];
+    }
+
+    try {
+      console.log(
+        `📊 Fetching positions from ${exchange}${symbol ? ` for symbol ${symbol}` : ''} via CCXT...`
+      );
+
+      // Use CCXT for position fetching
+      const result = await ccxtExchangeService.getPositions({
+        exchange: credentials.exchange,
+        apiKey: credentials.apiKey,
+        apiSecret: credentials.apiSecret,
+      });
+
+      if (!result.success) {
+        console.error(`❌ Failed to fetch positions from ${exchange} via CCXT:`, result.error);
+        return [];
+      }
+
+      console.log(
+        `✅ Successfully fetched ${result.data?.length || 0} positions from ${exchange} via CCXT`
+      );
+
+      // Transform CCXT positions to our Position format
+      const positions: Position[] =
+        result.data?.map((pos) => ({
+          id: pos.id,
+          exchange: pos.exchange,
+          symbol: pos.symbol,
+          side: pos.side,
+          contracts: pos.contracts,
+          entryPrice: pos.entryPrice,
+          markPrice: pos.markPrice,
+          leverage: pos.leverage,
+          unrealizedPnl: pos.unrealizedPnl,
+          realizedPnl: 0, // Real-time PnL calculation would require additional logic
+          margin: pos.margin,
+          liquidationPrice: pos.liquidationPrice,
+          percentage: pos.margin > 0 ? (pos.unrealizedPnl / pos.margin) * 100 : 0,
+          timestamp: pos.timestamp,
+        })) || [];
+
+      // Filter by symbol if requested
+      if (symbol) {
+        const filtered = positions.filter((p) => p.symbol === symbol);
+        console.log(
+          `🔍 Filtered ${positions.length} positions to ${filtered.length} for symbol ${symbol}`
+        );
+        return filtered;
+      }
+
+      return positions;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.error(`💥 Exception while fetching positions from ${exchange}:`, errorMessage);
+      return [];
+    }
+  }
+
+  // Open a new position using CCXT
+  // UPDATED: [HIGH] - [2025-09-01] - Claude Code
+  // Replaced custom order placement with CCXT unified order API
+  async openPosition(order: TradingOrder): Promise<any> {
+    const credentials = await this.getExchangeCredentials(order.exchange);
+
+    if (!credentials) {
+      return {
+        success: false,
+        error: `Not connected to ${order.exchange}`,
+      };
+    }
+
+    // Validate order parameters
+    if (!order.amount || order.amount <= 0) {
+      return {
+        success: false,
+        error: 'Invalid order amount',
+      };
+    }
+
+    try {
+      console.log(
+        `📝 Opening position: ${order.side.toUpperCase()} ${order.amount} ${order.symbol} on ${order.exchange} via CCXT...`
+      );
+
+      // Use CCXT for order placement
+      const result = await ccxtExchangeService.placeOrder(
+        {
+          exchange: credentials.exchange,
+          apiKey: credentials.apiKey,
+          apiSecret: credentials.apiSecret,
+        },
+        {
+          symbol: order.symbol,
+          side: order.side,
+          amount: order.amount,
+          type: 'market', // Use market orders for immediate execution
+        }
+      );
+
+      if (!result.success) {
+        console.error(`❌ Order placement failed on ${order.exchange}:`, result.error);
+        return {
+          success: false,
+          error: result.error || 'Order placement failed',
+        };
+      }
+
+      console.log(`✅ Position opened successfully on ${order.exchange}:`, result.data);
+
+      return {
+        success: true,
+        orderId: result.data?.orderId,
+        symbol: result.data?.symbol,
+        side: result.data?.side,
+        quantity: result.data?.amount,
+        status: result.data?.status,
+        message: `Position opened: ${order.side.toUpperCase()} ${order.amount} ${order.symbol} (CCXT)`,
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to place order';
+      console.error(`💥 Exception in openPosition:`, errorMessage);
+
+      return {
+        success: false,
+        error: errorMessage,
+      };
+    }
+  }
+
+  // Close a position using CCXT
+  // UPDATED: [HIGH] - [2025-09-01] - Claude Code
+  // Replaced custom position closing with CCXT unified order API
+  async closePosition(exchange: 'binance' | 'gate', symbol: string): Promise<any> {
+    const credentials = await this.getExchangeCredentials(exchange);
+
+    if (!credentials) {
+      return {
+        success: false,
+        error: `Not connected to ${exchange}`,
+      };
+    }
+
+    try {
+      console.log(`🔴 Closing position for ${symbol} on ${exchange} via CCXT...`);
+
+      // First, get current position to determine the side and size
+      const positions = await this.getPositions(exchange, symbol);
+      const position = positions.find((p) => p.symbol === symbol);
+
+      if (!position) {
+        console.warn(`⚠️ No open position found for ${symbol} on ${exchange}`);
+        return {
+          success: false,
+          error: `No open position found for ${symbol}`,
+        };
+      }
+
+      console.log(`📊 Found position to close:`, {
+        symbol: position.symbol,
+        side: position.side,
+        contracts: position.contracts,
+        unrealizedPnl: position.unrealizedPnl,
+      });
+
+      // Place opposite order to close position
+      const closeOrderSide = position.side === 'long' ? 'sell' : ('buy' as 'buy' | 'sell');
+
+      const result = await ccxtExchangeService.placeOrder(
+        {
+          exchange: credentials.exchange,
+          apiKey: credentials.apiKey,
+          apiSecret: credentials.apiSecret,
+        },
+        {
+          symbol,
+          side: closeOrderSide,
+          amount: position.contracts,
+          type: 'market', // Use market order for immediate execution
+        }
+      );
+
+      if (!result.success) {
+        console.error(`❌ Failed to close position for ${symbol}:`, result.error);
+        return {
+          success: false,
+          error: result.error || 'Failed to close position',
+        };
+      }
+
+      console.log(`✅ Position closed successfully for ${symbol}:`, result.data);
+
+      return {
+        success: true,
+        orderId: result.data?.orderId,
+        message: `Position closed: ${symbol} (CCXT)`,
+        finalPnl: position.unrealizedPnl,
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to close position';
+      console.error(`💥 Exception in closePosition:`, errorMessage);
+
+      return {
+        success: false,
+        error: errorMessage,
+      };
+    }
+  }
+
+  // Get market data using CCXT
+  // UPDATED: [MEDIUM] - [2025-09-01] - Claude Code
+  // Replaced custom market data fetching with CCXT unified ticker API
+  async getMarketData(exchange: 'binance' | 'gate', symbol: string): Promise<MarketData> {
+    const credentials = await this.getExchangeCredentials(exchange);
+
+    if (!credentials) {
+      throw new Error(`Not connected to ${exchange}`);
+    }
+
+    try {
+      console.log(`📊 Fetching market data for ${symbol} from ${exchange} via CCXT...`);
+
+      const result = await ccxtExchangeService.getMarketData(
+        {
+          exchange: credentials.exchange,
+          apiKey: credentials.apiKey,
+          apiSecret: credentials.apiSecret,
+        },
+        symbol
+      );
+
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to fetch market data');
+      }
+
+      console.log(`✅ Market data fetched successfully for ${symbol} from ${exchange}`);
+      return result.data!;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.error(`❌ Failed to fetch market data for ${symbol} from ${exchange}:`, errorMessage);
+      throw new Error(`Unable to fetch market data: ${errorMessage}`);
+    }
+  }
+
+  // DEPRECATED: [MEDIUM] - [2025-09-01] - Claude Code
+  // These custom market data methods are replaced by CCXT unified API
+  // Keeping for backwards compatibility during transition period
+  // TODO: Remove these methods after full CCXT migration is tested
+
+  // Get real Binance market data (DEPRECATED - use CCXT instead)
+  private async getBinanceMarketData(symbol: string): Promise<MarketData> {
+    console.warn('⚠️ getBinanceMarketData is deprecated. Use CCXT-based getMarketData instead.');
+
+    const formattedSymbol = symbol.replace('/', '');
+    const response = await fetch(
+      `https://api.binance.com/api/v3/ticker/24hr?symbol=${formattedSymbol}`
+    );
+
+    if (!response.ok) {
+      throw new Error(`Binance API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    return {
+      symbol,
+      last: parseFloat(data.lastPrice),
+      bid: parseFloat(data.bidPrice),
+      ask: parseFloat(data.askPrice),
+      volume24h: parseFloat(data.volume),
+      change24h: parseFloat(data.priceChangePercent),
+      high24h: parseFloat(data.highPrice),
+      low24h: parseFloat(data.lowPrice),
+      timestamp: Date.now(),
+    };
+  }
+
+  // Get real Gate.io market data (DEPRECATED - use CCXT instead)
+  private async getGateMarketData(symbol: string): Promise<MarketData> {
+    console.warn('⚠️ getGateMarketData is deprecated. Use CCXT-based getMarketData instead.');
+
+    const formattedSymbol = symbol.replace('/', '_');
+    const response = await fetch(
+      `https://api.gateio.ws/api/v4/spot/tickers?currency_pair=${formattedSymbol}`
+    );
+
+    if (!response.ok) {
+      throw new Error(`Gate.io API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    if (!data.length) {
+      throw new Error(`No market data found for ${symbol}`);
+    }
+
+    const ticker = data[0];
+
+    return {
+      symbol,
+      last: parseFloat(ticker.last),
+      bid: parseFloat(ticker.highest_bid),
+      ask: parseFloat(ticker.lowest_ask),
+      volume24h: parseFloat(ticker.base_volume),
+      change24h: parseFloat(ticker.change_percentage),
+      high24h: parseFloat(ticker.high_24h),
+      low24h: parseFloat(ticker.low_24h),
+      timestamp: Date.now(),
+    };
+  }
+
+  // Get open orders using CCXT
+  // UPDATED: [MEDIUM] - [2025-09-01] - Claude Code
+  // Replaced backend API call with CCXT direct exchange integration
+  async getOpenOrders(exchange: 'binance' | 'gate', symbol?: string): Promise<any[]> {
+    const credentials = await this.getExchangeCredentials(exchange);
+
+    if (!credentials) {
+      console.warn(`⚠️ No credentials found for ${exchange}`);
+      return [];
+    }
+
+    try {
+      console.log(
+        `📊 Fetching open orders from ${exchange}${symbol ? ` for ${symbol}` : ''} via CCXT...`
+      );
+
+      const result = await ccxtExchangeService.getOpenOrders(
+        {
+          exchange: credentials.exchange,
+          apiKey: credentials.apiKey,
+          apiSecret: credentials.apiSecret,
+        },
+        symbol
+      );
+
+      if (!result.success) {
+        console.error(`❌ Failed to fetch open orders from ${exchange}:`, result.error);
+        return [];
+      }
+
+      console.log(`✅ Fetched ${result.data?.length || 0} open orders from ${exchange}`);
+      return result.data || [];
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.error(`💥 Exception in getOpenOrders:`, errorMessage);
+      return [];
+    }
+  }
+
+  // Cancel an order using CCXT
+  // UPDATED: [MEDIUM] - [2025-09-01] - Claude Code
+  // Replaced backend API call with CCXT direct exchange integration
+  async cancelOrder(exchange: 'binance' | 'gate', orderId: string, symbol: string): Promise<any> {
+    const credentials = await this.getExchangeCredentials(exchange);
+
+    if (!credentials) {
+      return {
+        success: false,
+        error: `Not connected to ${exchange}`,
+      };
+    }
+
+    try {
+      console.log(`❌ Cancelling order ${orderId} for ${symbol} on ${exchange} via CCXT...`);
+
+      const result = await ccxtExchangeService.cancelOrder(
+        {
+          exchange: credentials.exchange,
+          apiKey: credentials.apiKey,
+          apiSecret: credentials.apiSecret,
+        },
+        orderId,
+        symbol
+      );
+
+      if (result.success) {
+        console.log(`✅ Order ${orderId} cancelled successfully`);
+      } else {
+        console.error(`❌ Failed to cancel order ${orderId}:`, result.error);
+      }
+
+      return result;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to cancel order';
+      console.error(`💥 Exception in cancelOrder:`, errorMessage);
+
+      return {
+        success: false,
+        error: errorMessage,
+      };
+    }
+  }
+
+  // Get performance metrics
+  async getPerformanceMetrics(
+    exchange: 'binance' | 'gate',
+    startDate?: Date,
+    endDate?: Date
+  ): Promise<any> {
+    return this.makeRequest('/futures-trading/performance', {
+      method: 'POST',
+      body: JSON.stringify({
+        exchange,
+        startDate: startDate?.toISOString(),
+        endDate: endDate?.toISOString(),
+      }),
+    });
+  }
+
+  // Disconnect from exchange
+  async disconnectExchange(exchange: 'binance' | 'gate'): Promise<void> {
+    // Simply clear the stored credentials for development
+    // In production, this would also disconnect from the exchange API
+    await this.clearExchangeCredentials(exchange);
+  }
+
+  // Check if exchange is connected
+  async isExchangeConnected(exchange: 'binance' | 'gate'): Promise<boolean> {
+    try {
+      const credentials = await this.getExchangeCredentials(exchange);
+      if (!credentials) return false;
+
+      // Try to get balance as a connection check
+      await this.getAccountBalance(exchange);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // Diagnostic method to test CCXT position fetching
+  // UPDATED: [LOW] - [2025-09-01] - Claude Code
+  // Enhanced diagnostics to verify CCXT integration works correctly
+  async testPositionFetching(exchange: 'binance' | 'gate'): Promise<{
+    success: boolean;
+    positions: Position[];
+    error?: string;
+    details?: string;
+    serviceInfo?: any;
+  }> {
+    try {
+      console.log(`🔍 Testing CCXT position fetching for ${exchange}...`);
+
+      const credentials = await this.getExchangeCredentials(exchange);
+      if (!credentials) {
+        return {
+          success: false,
+          positions: [],
+          error: `No credentials found for ${exchange}`,
+          details: 'Please connect to the exchange first',
+        };
+      }
+
+      console.log(`🔑 Found credentials for ${exchange}`);
+
+      // Get Exchange Service diagnostics
+      const serviceInfo = ccxtExchangeService.getDiagnostics();
+      console.log(`🔧 Service Version: ${serviceInfo.serviceVersion}`);
+
+      // Test connection first
+      const connectionTest = await ccxtExchangeService.testConnection({
+        exchange: credentials.exchange,
+        apiKey: credentials.apiKey,
+        apiSecret: credentials.apiSecret,
+      });
+
+      if (!connectionTest.success) {
+        return {
+          success: false,
+          positions: [],
+          error: `Connection test failed: ${connectionTest.error}`,
+          details: 'CCXT connection test failed',
+          serviceInfo,
+        };
+      }
+
+      // Fetch positions
+      const positions = await this.getPositions(exchange);
+
+      return {
+        success: true,
+        positions,
+        details: `Successfully fetched ${positions.length} positions via CCXT`,
+        serviceInfo,
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.error(`💥 CCXT position fetching test failed:`, errorMessage);
+
+      return {
+        success: false,
+        positions: [],
+        error: errorMessage,
+        details: 'Check console logs for detailed CCXT error information',
+        serviceInfo: ccxtExchangeService.getDiagnostics(),
+      };
+    }
+  }
+
+  // Get multiple market data using CCXT
+  // UPDATED: [LOW] - [2025-09-01] - Claude Code
+  // Enhanced to use CCXT-based market data fetching
+  async getMultipleMarketData(
+    exchange: 'binance' | 'gate',
+    symbols: string[]
+  ): Promise<MarketData[]> {
+    console.log(
+      `📊 Fetching market data for ${symbols.length} symbols from ${exchange} via CCXT...`
+    );
+
+    try {
+      // Use Promise.all for parallel fetching with error handling per symbol
+      const promises = symbols.map(async (symbol) => {
+        try {
+          return await this.getMarketData(exchange, symbol);
+        } catch (error) {
+          console.warn(`⚠️ Failed to fetch market data for ${symbol}:`, error);
+          // Return null for failed requests to continue with other symbols
+          return null;
+        }
+      });
+
+      const results = await Promise.all(promises);
+
+      // Filter out failed requests
+      const validResults = results.filter((result): result is MarketData => result !== null);
+
+      console.log(
+        `✅ Successfully fetched market data for ${validResults.length}/${symbols.length} symbols`
+      );
+      return validResults;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.error(`💥 Exception in getMultipleMarketData:`, errorMessage);
+      return [];
+    }
+  }
+
+  // Calculate position risk
+  calculatePositionRisk(
+    position: Position,
+    accountBalance: number
+  ): {
+    riskPercentage: number;
+    riskAmount: number;
+    profitPercentage: number;
+    profitAmount: number;
+  } {
+    const riskAmount = position.margin;
+    const riskPercentage = (riskAmount / accountBalance) * 100;
+    const profitAmount = position.unrealizedPnl;
+    const profitPercentage = (profitAmount / position.margin) * 100;
+
+    return {
+      riskPercentage,
+      riskAmount,
+      profitPercentage,
+      profitAmount,
+    };
+  }
+
+  // Format price for display
+  formatPrice(price: number, decimals = 2): string {
+    return price.toLocaleString('en-US', {
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals,
+    });
+  }
+
+  // Format percentage
+  formatPercentage(value: number): string {
+    const formatted = value.toFixed(2);
+    return value >= 0 ? `+${formatted}%` : `${formatted}%`;
+  }
+}
+
+export default new FuturesTradingService();

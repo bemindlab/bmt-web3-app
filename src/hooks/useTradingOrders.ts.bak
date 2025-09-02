@@ -1,0 +1,440 @@
+/**
+ * Professional Trading Orders Hook
+ * 
+ * Handles order management, validation, and execution with advanced order types.
+ * Provides comprehensive order lifecycle management.
+ */
+
+import { useState, useCallback, useRef } from 'react';
+import { Alert } from 'react-native';
+import { useTradingStore } from '../stores/tradingStore';
+import { StorageService } from '../services/storage';
+import ccxtExchangeService from '../services/ccxtExchange.service';
+import * as Yup from 'yup';
+
+// Advanced order types for professional trading
+export type OrderType = 'market' | 'limit' | 'stop' | 'stopLimit' | 'oco' | 'trailingStop';
+export type OrderSide = 'buy' | 'sell';
+export type TimeInForce = 'GTC' | 'IOC' | 'FOK'; // Good Till Cancelled, Immediate Or Cancel, Fill Or Kill
+
+export interface OrderParameters {
+  symbol: string;
+  side: OrderSide;
+  type: OrderType;
+  amount: number;
+  price?: number; // For limit orders
+  stopPrice?: number; // For stop orders
+  leverage?: number;
+  timeInForce?: TimeInForce;
+  
+  // Risk management
+  stopLoss?: number;
+  takeProfit?: number;
+  trailingStopDistance?: number; // For trailing stop orders
+  
+  // OCO (One-Cancels-Other) parameters
+  ocoStopPrice?: number;
+  ocoLimitPrice?: number;
+}
+
+export interface OrderPreview {
+  estimatedFee: number;
+  estimatedTotal: number;
+  marginRequired: number;
+  liquidationPrice?: number;
+  riskWarnings: string[];
+  canExecute: boolean;
+}
+
+interface OrderState {
+  submitting: boolean;
+  validating: boolean;
+  lastOrderId: string | null;
+  validationErrors: Record<string, string>;
+  orderPreview: OrderPreview | null;
+}
+
+// Validation schema for order parameters
+const createOrderSchema = (balance: number, minOrderSize: number = 1) => {
+  return Yup.object().shape({
+    symbol: Yup.string().required('Symbol is required'),
+    side: Yup.string().oneOf(['buy', 'sell']).required('Order side is required'),
+    type: Yup.string().oneOf(['market', 'limit', 'stop', 'stopLimit', 'oco', 'trailingStop']).required('Order type is required'),
+    amount: Yup.number()
+      .min(minOrderSize, `Minimum order size is ${minOrderSize}`)
+      .max(balance * 0.95, 'Amount exceeds available balance')
+      .required('Amount is required'),
+    price: Yup.number().when('type', {
+      is: (type: string) => ['limit', 'stopLimit'].includes(type),
+      then: (schema) => schema.required('Price is required for limit orders').positive('Price must be positive'),
+      otherwise: (schema) => schema.notRequired(),
+    }),
+    stopPrice: Yup.number().when('type', {
+      is: (type: string) => ['stop', 'stopLimit', 'oco'].includes(type),
+      then: (schema) => schema.required('Stop price is required').positive('Stop price must be positive'),
+      otherwise: (schema) => schema.notRequired(),
+    }),
+    leverage: Yup.number().min(1).max(125).integer().required('Leverage is required'),
+  });
+};
+
+export const useTradingOrders = () => {
+  const {
+    activeExchange,
+    isConnected,
+    balances,
+    openPosition,
+    closePosition,
+  } = useTradingStore();
+
+  const [orderState, setOrderState] = useState<OrderState>({
+    submitting: false,
+    validating: false,
+    lastOrderId: null,
+    validationErrors: {},
+    orderPreview: null,
+  });
+
+  const [orderForm, setOrderForm] = useState<OrderParameters>({
+    symbol: 'BTCUSDT',
+    side: 'buy',
+    type: 'market',
+    amount: 0,
+    leverage: 10,
+    timeInForce: 'GTC',
+  });
+
+  // Debounced validation timer
+  const validationTimer = useRef<NodeJS.Timeout | null>(null);
+
+  const validateOrder = useCallback(async (params: OrderParameters) => {
+    setOrderState(prev => ({ ...prev, validating: true, validationErrors: {} }));
+
+    try {
+      const balance = balances[activeExchange];
+      if (!balance) {
+        throw new Error('Balance not available');
+      }
+
+      // Get minimum order size for the exchange
+      const minOrderSize = activeExchange === 'binance' ? 5 : 1; // USDT
+      
+      const schema = createOrderSchema(balance.availableMargin || 0, minOrderSize);
+      await schema.validate(params, { abortEarly: false });
+
+      // Additional custom validations
+      const errors: Record<string, string> = {};
+      const warnings: string[] = [];
+
+      // Price validations for limit orders
+      if (params.type === 'limit' && params.price) {
+        // Price should be reasonable (within 10% of current market price)
+        // This would require fetching current market price
+        // For now, just ensure it's positive
+        if (params.price <= 0) {
+          errors.price = 'Price must be positive';
+        }
+      }
+
+      // Stop loss validations
+      if (params.stopLoss) {
+        if (params.side === 'buy' && params.price && params.stopLoss >= params.price) {
+          errors.stopLoss = 'Stop loss should be below entry price for long positions';
+        }
+        if (params.side === 'sell' && params.price && params.stopLoss <= params.price) {
+          errors.stopLoss = 'Stop loss should be above entry price for short positions';
+        }
+      }
+
+      // Take profit validations
+      if (params.takeProfit) {
+        if (params.side === 'buy' && params.price && params.takeProfit <= params.price) {
+          errors.takeProfit = 'Take profit should be above entry price for long positions';
+        }
+        if (params.side === 'sell' && params.price && params.takeProfit >= params.price) {
+          errors.takeProfit = 'Take profit should be below entry price for short positions';
+        }
+      }
+
+      // Risk warnings
+      if (params.leverage && params.leverage > 20) {
+        warnings.push(`High leverage (${params.leverage}x) increases risk significantly`);
+      }
+      
+      const positionValue = params.amount * (params.leverage || 1);
+      const balanceRatio = positionValue / (balance.availableMargin || 1);
+      if (balanceRatio > 0.8) {
+        warnings.push('Using more than 80% of available balance');
+      }
+
+      // Calculate order preview
+      const estimatedFee = params.amount * 0.0006; // Approximate fee
+      const estimatedTotal = params.amount + estimatedFee;
+      const marginRequired = params.amount / (params.leverage || 1);
+      
+      const orderPreview: OrderPreview = {
+        estimatedFee,
+        estimatedTotal,
+        marginRequired,
+        riskWarnings: warnings,
+        canExecute: Object.keys(errors).length === 0,
+      };
+
+      setOrderState(prev => ({
+        ...prev,
+        validating: false,
+        validationErrors: errors,
+        orderPreview,
+      }));
+
+      return { valid: Object.keys(errors).length === 0, errors, preview: orderPreview };
+    } catch (error) {
+      const validationErrors: Record<string, string> = {};
+      
+      if (error instanceof Yup.ValidationError) {
+        error.inner.forEach(err => {
+          if (err.path) {
+            validationErrors[err.path] = err.message;
+          }
+        });
+      } else {
+        validationErrors.general = error instanceof Error ? error.message : 'Validation failed';
+      }
+
+      setOrderState(prev => ({
+        ...prev,
+        validating: false,
+        validationErrors,
+        orderPreview: null,
+      }));
+
+      return { valid: false, errors: validationErrors, preview: null };
+    }
+  }, [activeExchange, balances]);
+
+  const debouncedValidation = useCallback((params: OrderParameters) => {
+    if (validationTimer.current) {
+      clearTimeout(validationTimer.current);
+    }
+
+    validationTimer.current = setTimeout(() => {
+      validateOrder(params);
+    }, 300); // 300ms debounce
+  }, [validateOrder]);
+
+  const updateOrderForm = useCallback((updates: Partial<OrderParameters>) => {
+    const newForm = { ...orderForm, ...updates };
+    setOrderForm(newForm);
+    
+    // Trigger validation if the form has meaningful data
+    if (newForm.amount > 0 && newForm.symbol) {
+      debouncedValidation(newForm);
+    }
+  }, [orderForm, debouncedValidation]);
+
+  const previewOrder = useCallback(async (params: OrderParameters) => {
+    const validation = await validateOrder(params);
+    return validation.preview;
+  }, [validateOrder]);
+
+  const submitOrder = useCallback(async (params?: OrderParameters) => {
+    const orderParams = params || orderForm;
+    
+    if (!isConnected[activeExchange]) {
+      Alert.alert('Error', 'Please connect to exchange first');
+      return { success: false, error: 'Not connected to exchange' };
+    }
+
+    setOrderState(prev => ({ ...prev, submitting: true }));
+
+    try {
+      // Final validation before submission
+      const validation = await validateOrder(orderParams);
+      if (!validation.valid) {
+        throw new Error('Order validation failed');
+      }
+
+      // Get API credentials
+      const savedApiKeys = await StorageService.getApiKeys();
+      const exchangeKey = activeExchange === 'binance' ? 'binance' : 'gateio';
+
+      if (!savedApiKeys || !savedApiKeys[exchangeKey]) {
+        throw new Error(`No API keys found for ${activeExchange}`);
+      }
+
+      const credentials = savedApiKeys[exchangeKey];
+      if (!credentials || !credentials.includes(':')) {
+        throw new Error(`Invalid API credentials format for ${activeExchange}`);
+      }
+
+      const [apiKey, apiSecret] = credentials.split(':');
+
+      console.log(`📝 Placing ${orderParams.type} ${orderParams.side} order via CCXT...`);
+
+      // For now, use market orders through CCXT service
+      const orderResult = await ccxtExchangeService.placeOrder(
+        {
+          exchange: activeExchange,
+          apiKey,
+          apiSecret,
+          testnet: false,
+        },
+        {
+          symbol: orderParams.symbol,
+          side: orderParams.side,
+          amount: orderParams.amount,
+          type: orderParams.type === 'market' ? 'market' : 'limit',
+          price: orderParams.price,
+        }
+      );
+
+      if (orderResult.success && orderResult.data) {
+        console.log(`✅ Order placed successfully:`, orderResult.data);
+
+        // Also use the legacy store method for compatibility
+        const legacyParams = {
+          symbol: orderParams.symbol,
+          side: orderParams.side,
+          amount: orderParams.amount,
+          leverage: orderParams.leverage || 1,
+          stopLoss: orderParams.stopLoss,
+          takeProfit: orderParams.takeProfit,
+        };
+
+        const storeSuccess = await openPosition(legacyParams);
+
+        if (storeSuccess) {
+          setOrderState(prev => ({
+            ...prev,
+            submitting: false,
+            lastOrderId: orderResult.data.orderId,
+          }));
+
+          // Reset form after successful order
+          setOrderForm(prev => ({
+            ...prev,
+            amount: 0,
+            price: undefined,
+            stopLoss: undefined,
+            takeProfit: undefined,
+          }));
+
+          return {
+            success: true,
+            data: orderResult.data,
+            message: 'Order placed successfully',
+          };
+        }
+      }
+
+      throw new Error(orderResult.error || 'Failed to place order');
+    } catch (error) {
+      console.error('❌ Order submission error:', error);
+      
+      const errorMessage = error instanceof Error ? error.message : 'Failed to submit order';
+      
+      setOrderState(prev => ({
+        ...prev,
+        submitting: false,
+        validationErrors: {
+          ...prev.validationErrors,
+          submission: errorMessage,
+        },
+      }));
+
+      Alert.alert('Order Failed', errorMessage);
+      
+      return { success: false, error: errorMessage };
+    }
+  }, [orderForm, activeExchange, isConnected, validateOrder, openPosition]);
+
+  const cancelOrder = useCallback(async (orderId: string) => {
+    // Implementation would depend on exchange API capabilities
+    console.log(`Cancelling order ${orderId}...`);
+    // This would call the appropriate CCXT service method
+  }, []);
+
+  const getOrderTypeDisplay = useCallback((type: OrderType) => {
+    const displayNames: Record<OrderType, string> = {
+      market: 'Market',
+      limit: 'Limit',
+      stop: 'Stop',
+      stopLimit: 'Stop Limit',
+      oco: 'OCO',
+      trailingStop: 'Trailing Stop',
+    };
+    return displayNames[type] || type;
+  }, []);
+
+  const calculateRiskReward = useCallback((params: OrderParameters) => {
+    if (!params.price || (!params.stopLoss && !params.takeProfit)) {
+      return null;
+    }
+
+    const entryPrice = params.price;
+    const stopLoss = params.stopLoss;
+    const takeProfit = params.takeProfit;
+
+    if (!stopLoss || !takeProfit) return null;
+
+    const risk = Math.abs(entryPrice - stopLoss);
+    const reward = Math.abs(takeProfit - entryPrice);
+    const ratio = reward / risk;
+
+    return {
+      risk: risk * params.amount,
+      reward: reward * params.amount,
+      ratio: parseFloat(ratio.toFixed(2)),
+      isGoodRatio: ratio >= 2, // Professional traders typically look for 2:1 or better
+    };
+  }, []);
+
+  return {
+    // Order form state
+    orderForm,
+    updateOrderForm,
+
+    // Order state
+    orderState,
+    isSubmitting: orderState.submitting,
+    isValidating: orderState.validating,
+    validationErrors: orderState.validationErrors,
+    orderPreview: orderState.orderPreview,
+
+    // Order actions
+    submitOrder,
+    previewOrder,
+    cancelOrder,
+    validateOrder,
+
+    // Utilities
+    getOrderTypeDisplay,
+    calculateRiskReward: (params?: OrderParameters) => calculateRiskReward(params || orderForm),
+    
+    // Quick order presets
+    setQuickOrder: (side: OrderSide, percentage: number) => {
+      const balance = balances[activeExchange];
+      if (balance?.availableMargin) {
+        const amount = (balance.availableMargin * percentage) / 100;
+        updateOrderForm({ side, amount });
+      }
+    },
+
+    // Reset functions
+    resetOrderForm: () => {
+      setOrderForm({
+        symbol: orderForm.symbol, // Keep current symbol
+        side: 'buy',
+        type: 'market',
+        amount: 0,
+        leverage: 10,
+        timeInForce: 'GTC',
+      });
+      setOrderState(prev => ({
+        ...prev,
+        validationErrors: {},
+        orderPreview: null,
+      }));
+    },
+  };
+};

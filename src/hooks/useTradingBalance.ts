@@ -1,0 +1,326 @@
+/**
+ * Professional Trading Balance Hook
+ * 
+ * Handles balance fetching, caching, and real-time updates.
+ * Provides unified interface for both spot and futures balances.
+ */
+
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { Alert } from 'react-native';
+import { useTradingStore } from '../stores/tradingStore';
+import { StorageService } from '../services/storage';
+import ccxtExchangeService from '../services/ccxtExchange.service';
+
+interface SpotBalance {
+  asset: string;
+  balance: number;
+  availableBalance: number;
+  exchange: string;
+  type: 'spot';
+  timestamp: number;
+}
+
+interface BalanceState {
+  loading: boolean;
+  lastUpdate: Date | null;
+  autoRefreshEnabled: boolean;
+  refreshInterval: number; // in milliseconds
+  error: string | null;
+}
+
+interface BalanceCache {
+  [key: string]: {
+    data: SpotBalance;
+    timestamp: number;
+    ttl: number; // time to live in milliseconds
+  };
+}
+
+export const useTradingBalance = () => {
+  const {
+    balances,
+    activeExchange,
+    isConnected,
+    refreshAll,
+  } = useTradingStore();
+
+  const [spotBalance, setSpotBalance] = useState<SpotBalance | null>(null);
+  const [balanceState, setBalanceState] = useState<BalanceState>({
+    loading: false,
+    lastUpdate: null,
+    autoRefreshEnabled: true,
+    refreshInterval: 30000, // 30 seconds
+    error: null,
+  });
+
+  // Cache for balance data to avoid excessive API calls
+  const balanceCache = useRef<BalanceCache>({});
+  const refreshTimer = useRef<NodeJS.Timeout | null>(null);
+
+  // Auto-refresh balance when connected
+  useEffect(() => {
+    if (isConnected[activeExchange] && balanceState.autoRefreshEnabled) {
+      startAutoRefresh();
+    } else {
+      stopAutoRefresh();
+    }
+
+    return () => stopAutoRefresh();
+  }, [isConnected, activeExchange, balanceState.autoRefreshEnabled]);
+
+  const getCacheKey = useCallback((exchange: string, type: 'spot' | 'futures') => {
+    return `${exchange}_${type}_balance`;
+  }, []);
+
+  const isCacheValid = useCallback((cacheKey: string) => {
+    const cached = balanceCache.current[cacheKey];
+    if (!cached) return false;
+    
+    const now = Date.now();
+    return (now - cached.timestamp) < cached.ttl;
+  }, []);
+
+  const setCachedBalance = useCallback((cacheKey: string, data: SpotBalance, ttlMs: number = 60000) => {
+    balanceCache.current[cacheKey] = {
+      data,
+      timestamp: Date.now(),
+      ttl: ttlMs,
+    };
+  }, []);
+
+  const getCachedBalance = useCallback((cacheKey: string): SpotBalance | null => {
+    const cached = balanceCache.current[cacheKey];
+    if (!cached || !isCacheValid(cacheKey)) {
+      return null;
+    }
+    return cached.data;
+  }, [isCacheValid]);
+
+  const fetchSpotBalance = useCallback(async (useCache = true) => {
+    const cacheKey = getCacheKey(activeExchange, 'spot');
+    
+    // Return cached data if available and valid
+    if (useCache) {
+      const cached = getCachedBalance(cacheKey);
+      if (cached) {
+        setSpotBalance(cached);
+        return cached;
+      }
+    }
+
+    setBalanceState(prev => ({ ...prev, loading: true, error: null }));
+
+    try {
+      // Get saved credentials
+      const savedApiKeys = await StorageService.getApiKeys();
+      const exchangeKey = activeExchange === 'binance' ? 'binance' : 'gateio';
+
+      if (!savedApiKeys || !savedApiKeys[exchangeKey]) {
+        throw new Error(`No API keys found for ${activeExchange}`);
+      }
+
+      const credentials = savedApiKeys[exchangeKey];
+      if (!credentials || !credentials.includes(':')) {
+        throw new Error(`Invalid API credentials format for ${activeExchange}`);
+      }
+
+      const [apiKey, apiSecret] = credentials.split(':');
+
+      console.log(`📊 Fetching USDT spot balance from ${activeExchange} via CCXT...`);
+      
+      const spotResult = await ccxtExchangeService.getBalance(
+        {
+          exchange: activeExchange,
+          apiKey,
+          apiSecret,
+          testnet: false,
+        },
+        'spot'
+      );
+
+      if (spotResult.success && spotResult.data) {
+        const balanceData: SpotBalance = {
+          asset: spotResult.data.asset,
+          balance: spotResult.data.balance,
+          availableBalance: spotResult.data.availableBalance,
+          exchange: activeExchange,
+          type: 'spot',
+          timestamp: spotResult.data.timestamp,
+        };
+
+        console.log('✅ USDT spot balance loaded via CCXT:', balanceData);
+        
+        // Cache the result
+        setCachedBalance(cacheKey, balanceData);
+        setSpotBalance(balanceData);
+        
+        setBalanceState(prev => ({
+          ...prev,
+          loading: false,
+          lastUpdate: new Date(),
+          error: null,
+        }));
+
+        return balanceData;
+      } else {
+        throw new Error(spotResult.error || 'Failed to fetch spot balance');
+      }
+    } catch (error) {
+      console.error('❌ Error fetching spot balance via CCXT:', error);
+      
+      const errorMessage = error instanceof Error ? error.message : 'Failed to fetch balances';
+      
+      setBalanceState(prev => ({
+        ...prev,
+        loading: false,
+        error: errorMessage,
+      }));
+
+      // Don't show alert for every auto-refresh failure
+      if (!useCache) {
+        Alert.alert(
+          'Balance Error',
+          errorMessage,
+          [
+            { text: 'Retry', onPress: () => fetchSpotBalance(false) },
+            { text: 'Cancel' },
+          ]
+        );
+      }
+
+      return null;
+    }
+  }, [activeExchange, getCacheKey, getCachedBalance, setCachedBalance]);
+
+  const fetchAllBalances = useCallback(async (useCache = true) => {
+    setBalanceState(prev => ({ ...prev, loading: true, error: null }));
+
+    try {
+      // Fetch spot balance
+      await fetchSpotBalance(useCache);
+      
+      // Fetch futures balance through the store
+      await refreshAll();
+
+      setBalanceState(prev => ({
+        ...prev,
+        loading: false,
+        lastUpdate: new Date(),
+        error: null,
+      }));
+
+      console.log(`✅ All balances refreshed at ${new Date().toLocaleTimeString()}`);
+    } catch (error) {
+      console.error('❌ Error fetching all balances:', error);
+      
+      setBalanceState(prev => ({
+        ...prev,
+        loading: false,
+        error: error instanceof Error ? error.message : 'Failed to refresh balances',
+      }));
+    }
+  }, [fetchSpotBalance, refreshAll]);
+
+  const startAutoRefresh = useCallback(() => {
+    if (refreshTimer.current) return;
+
+    const refresh = () => {
+      if (isConnected[activeExchange]) {
+        fetchAllBalances(true); // Use cache for auto-refresh
+      }
+    };
+
+    // Initial refresh
+    refresh();
+
+    // Set up interval
+    refreshTimer.current = setInterval(refresh, balanceState.refreshInterval);
+    
+    console.log(`🔄 Auto-refresh started for ${activeExchange} (${balanceState.refreshInterval}ms interval)`);
+  }, [isConnected, activeExchange, fetchAllBalances, balanceState.refreshInterval]);
+
+  const stopAutoRefresh = useCallback(() => {
+    if (refreshTimer.current) {
+      clearInterval(refreshTimer.current);
+      refreshTimer.current = null;
+      console.log(`⏹️ Auto-refresh stopped for ${activeExchange}`);
+    }
+  }, [activeExchange]);
+
+  const toggleAutoRefresh = useCallback(() => {
+    setBalanceState(prev => ({
+      ...prev,
+      autoRefreshEnabled: !prev.autoRefreshEnabled,
+    }));
+  }, []);
+
+  const setRefreshInterval = useCallback((intervalMs: number) => {
+    const validInterval = Math.max(10000, intervalMs); // Minimum 10 seconds
+    
+    setBalanceState(prev => ({
+      ...prev,
+      refreshInterval: validInterval,
+    }));
+
+    // Restart auto-refresh with new interval if it's currently running
+    if (refreshTimer.current) {
+      stopAutoRefresh();
+      setTimeout(startAutoRefresh, 100); // Small delay to ensure cleanup
+    }
+  }, [stopAutoRefresh, startAutoRefresh]);
+
+  const clearCache = useCallback(() => {
+    balanceCache.current = {};
+    console.log('🗑️ Balance cache cleared');
+  }, []);
+
+  const forceRefresh = useCallback(async () => {
+    clearCache();
+    await fetchAllBalances(false); // Force fresh data
+  }, [clearCache, fetchAllBalances]);
+
+  // Calculate total portfolio value (simplified)
+  const calculatePortfolioValue = useCallback(() => {
+    const futuresBalance = balances[activeExchange];
+    const spotValue = spotBalance?.balance || 0;
+    const futuresValue = futuresBalance?.availableMargin || 0;
+
+    return {
+      total: spotValue + futuresValue,
+      spot: spotValue,
+      futures: futuresValue,
+      unrealizedPnL: futuresBalance?.unrealizedPnl || 0,
+    };
+  }, [spotBalance, balances, activeExchange]);
+
+  return {
+    // Balance data
+    spotBalance,
+    futuresBalance: balances[activeExchange],
+    portfolioValue: calculatePortfolioValue(),
+
+    // State
+    balanceState,
+    isLoading: balanceState.loading,
+    lastUpdate: balanceState.lastUpdate,
+    error: balanceState.error,
+
+    // Actions
+    fetchSpotBalance: () => fetchSpotBalance(false),
+    fetchAllBalances: () => fetchAllBalances(false),
+    forceRefresh,
+    clearCache,
+
+    // Auto-refresh controls
+    toggleAutoRefresh,
+    setRefreshInterval,
+    isAutoRefreshEnabled: balanceState.autoRefreshEnabled,
+    refreshInterval: balanceState.refreshInterval,
+
+    // Utilities
+    formatLastUpdate: () => {
+      if (!balanceState.lastUpdate) return 'Never';
+      return balanceState.lastUpdate.toLocaleTimeString();
+    },
+  };
+};

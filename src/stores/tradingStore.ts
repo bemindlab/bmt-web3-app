@@ -1,0 +1,582 @@
+import { create } from 'zustand';
+import FuturesTradingService, {
+  Position,
+  AccountBalance,
+  MarketData,
+  ExchangeCredentials,
+} from '../services/futuresTrading.service';
+import IndicatorService, {
+  IndicatorSignal,
+  IndicatorState,
+  MarketCandle,
+} from '../services/indicator.service';
+import RiskManagementService, {
+  RiskAssessment,
+  TradeHistory,
+} from '../services/riskManagement.service';
+
+interface TradingState {
+  // Connection state
+  isConnected: {
+    binance: boolean;
+    gate: boolean;
+  };
+  activeExchange: 'binance' | 'gate';
+
+  // Data
+  positions: Position[];
+  balances: {
+    binance: AccountBalance | null;
+    gate: AccountBalance | null;
+  };
+  marketData: Map<string, MarketData>;
+
+  // Indicator data
+  indicatorStates: Map<string, IndicatorState>;
+  tradingSignals: Map<string, IndicatorSignal>;
+  subscribedSymbols: Set<string>;
+  autoTradingEnabled: boolean;
+
+  // Risk management data
+  riskAssessments: Map<string, RiskAssessment>;
+  tradeHistory: TradeHistory[];
+  riskManagementEnabled: boolean;
+
+  // UI state
+  loading: boolean;
+  error: string | null;
+  refreshing: boolean;
+
+  // Actions
+  initializeExchange: (credentials: ExchangeCredentials) => Promise<boolean>;
+  disconnectExchange: (exchange: 'binance' | 'gate') => Promise<void>;
+  setActiveExchange: (exchange: 'binance' | 'gate') => void;
+
+  // Data fetching
+  fetchPositions: () => Promise<void>;
+  fetchBalance: (exchange?: 'binance' | 'gate') => Promise<void>;
+  fetchMarketData: (symbol: string) => Promise<void>;
+  refreshAll: () => Promise<void>;
+
+  // Trading actions
+  openPosition: (params: {
+    symbol: string;
+    side: 'buy' | 'sell';
+    amount: number;
+    leverage?: number;
+    stopLoss?: number;
+    takeProfit?: number;
+  }) => Promise<boolean>;
+  closePosition: (symbol: string) => Promise<boolean>;
+
+  // Indicator actions
+  subscribeToIndicators: (symbol: string) => Promise<void>;
+  unsubscribeFromIndicators: (symbol: string) => void;
+  updateMarketCandles: (symbol: string, candles: MarketCandle[]) => Promise<void>;
+  getIndicatorState: (symbol: string) => IndicatorState | null;
+  getTradingSignal: (symbol: string) => IndicatorSignal | null;
+  executeSignalTrade: (signal: IndicatorSignal, amount: number) => Promise<boolean>;
+  setAutoTrading: (enabled: boolean) => void;
+
+  // Risk management actions
+  assessTradeRisk: (symbol: string, signal: IndicatorSignal, amount: number) => RiskAssessment | null;
+  recordTradeResult: (trade: TradeHistory) => void;
+  getRiskStatistics: () => any;
+  setRiskManagement: (enabled: boolean) => void;
+
+  // Utilities
+  clearError: () => void;
+  reset: () => void;
+}
+
+const initialState = {
+  isConnected: {
+    binance: false,
+    gate: false,
+  },
+  activeExchange: 'gate' as const,
+  positions: [],
+  balances: {
+    binance: null,
+    gate: null,
+  },
+  marketData: new Map(),
+  
+  // Indicator initial state
+  indicatorStates: new Map(),
+  tradingSignals: new Map(),
+  subscribedSymbols: new Set(),
+  autoTradingEnabled: false,
+
+  // Risk management initial state
+  riskAssessments: new Map(),
+  tradeHistory: [],
+  riskManagementEnabled: true,
+  
+  loading: false,
+  error: null,
+  refreshing: false,
+};
+
+export const useTradingStore = create<TradingState>()((set, get) => ({
+  ...initialState,
+
+  initializeExchange: async (credentials) => {
+    set({ loading: true, error: null });
+
+    try {
+      const result = await FuturesTradingService.initializeExchange(credentials);
+
+      if (result.success) {
+        set((state) => ({
+          isConnected: {
+            ...state.isConnected,
+            [credentials.exchange]: true,
+          },
+        }));
+
+        // Fetch initial data
+        const { fetchBalance, fetchPositions, subscribeToIndicators } = get();
+        await Promise.all([fetchBalance(credentials.exchange), fetchPositions()]);
+        
+        // Initialize indicators for common trading pairs
+        const commonPairs = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT'];
+        for (const symbol of commonPairs) {
+          await subscribeToIndicators(symbol);
+        }
+
+        set({ loading: false });
+        return true;
+      } else {
+        set({
+          loading: false,
+          error: result.message || 'Failed to connect to exchange',
+        });
+        return false;
+      }
+    } catch (error) {
+      set({
+        loading: false,
+        error: error instanceof Error ? error.message : 'Connection failed',
+      });
+      return false;
+    }
+  },
+
+  disconnectExchange: async (exchange) => {
+    try {
+      await FuturesTradingService.disconnectExchange(exchange);
+
+      set((state) => ({
+        isConnected: {
+          ...state.isConnected,
+          [exchange]: false,
+        },
+        balances: {
+          ...state.balances,
+          [exchange]: null,
+        },
+        positions: state.positions.filter((p) => p.exchange !== exchange),
+      }));
+    } catch (error) {
+      console.error('Failed to disconnect:', error);
+    }
+  },
+
+  setActiveExchange: (exchange) => {
+    set({ activeExchange: exchange });
+  },
+
+  fetchPositions: async () => {
+    const { activeExchange, isConnected } = get();
+
+    if (!isConnected[activeExchange]) return;
+
+    try {
+      const positions = await FuturesTradingService.getPositions(activeExchange);
+      set({ positions });
+    } catch (error) {
+      console.error('Failed to fetch positions:', error);
+    }
+  },
+
+  fetchBalance: async (exchange) => {
+    const { activeExchange, isConnected } = get();
+    const targetExchange = exchange || activeExchange;
+
+    if (!isConnected[targetExchange]) return;
+
+    try {
+      const balance = await FuturesTradingService.getAccountBalance(targetExchange);
+
+      set((state) => ({
+        balances: {
+          ...state.balances,
+          [targetExchange]: balance,
+        },
+      }));
+    } catch (error) {
+      console.error('Failed to fetch balance:', error);
+    }
+  },
+
+  fetchMarketData: async (symbol) => {
+    const { activeExchange, isConnected } = get();
+
+    if (!isConnected[activeExchange]) return;
+
+    try {
+      const data = await FuturesTradingService.getMarketData(activeExchange, symbol);
+
+      set((state) => {
+        const newMarketData = new Map(state.marketData);
+        newMarketData.set(symbol, data);
+        return { marketData: newMarketData };
+      });
+    } catch (error) {
+      console.error('Failed to fetch market data:', error);
+    }
+  },
+
+  refreshAll: async () => {
+    set({ refreshing: true });
+
+    const { fetchPositions, fetchBalance, activeExchange, isConnected } = get();
+
+    if (!isConnected[activeExchange]) {
+      set({ refreshing: false });
+      return;
+    }
+
+    try {
+      await Promise.all([fetchPositions(), fetchBalance()]);
+    } catch (error) {
+      console.error('Failed to refresh data:', error);
+    } finally {
+      set({ refreshing: false });
+    }
+  },
+
+  openPosition: async (params) => {
+    const { activeExchange } = get();
+
+    set({ loading: true, error: null });
+
+    try {
+      const result = await FuturesTradingService.openPosition({
+        exchange: activeExchange,
+        ...params,
+      });
+
+      if (result.success) {
+        // Refresh positions and balance
+        const { fetchPositions, fetchBalance } = get();
+        await Promise.all([fetchPositions(), fetchBalance()]);
+
+        set({ loading: false });
+        return true;
+      } else {
+        set({
+          loading: false,
+          error: result.error || 'Failed to open position',
+        });
+        return false;
+      }
+    } catch (error) {
+      set({
+        loading: false,
+        error: error instanceof Error ? error.message : 'Failed to open position',
+      });
+      return false;
+    }
+  },
+
+  closePosition: async (symbol) => {
+    const { activeExchange } = get();
+
+    set({ loading: true, error: null });
+
+    try {
+      const result = await FuturesTradingService.closePosition(activeExchange, symbol);
+
+      if (result.success) {
+        // Refresh positions and balance
+        const { fetchPositions, fetchBalance } = get();
+        await Promise.all([fetchPositions(), fetchBalance()]);
+
+        set({ loading: false });
+        return true;
+      } else {
+        set({
+          loading: false,
+          error: result.error || 'Failed to close position',
+        });
+        return false;
+      }
+    } catch (error) {
+      set({
+        loading: false,
+        error: error instanceof Error ? error.message : 'Failed to close position',
+      });
+      return false;
+    }
+  },
+
+  clearError: () => {
+    set({ error: null });
+  },
+
+  // Indicator actions implementation
+  subscribeToIndicators: async (symbol) => {
+    const { subscribedSymbols } = get();
+    if (subscribedSymbols.has(symbol)) return;
+
+    try {
+      const indicatorService = IndicatorService.getInstance();
+      
+      // Subscribe to real-time updates
+      indicatorService.subscribe(symbol, (state: IndicatorState) => {
+        set((currentState) => {
+          const newIndicatorStates = new Map(currentState.indicatorStates);
+          const newTradingSignals = new Map(currentState.tradingSignals);
+          
+          newIndicatorStates.set(symbol, state);
+          
+          if (state.combinedSignal) {
+            newTradingSignals.set(symbol, state.combinedSignal);
+            
+            // Auto-trading logic
+            if (currentState.autoTradingEnabled && 
+                state.combinedSignal.type !== 'HOLD' && 
+                state.combinedSignal.strength >= 75) {
+              // TODO: Implement auto-trading with risk management
+              console.log(`Auto-trade signal for ${symbol}:`, state.combinedSignal);
+            }
+          }
+          
+          return {
+            indicatorStates: newIndicatorStates,
+            tradingSignals: newTradingSignals,
+          };
+        });
+      });
+
+      // Start real-time updates
+      indicatorService.startRealTimeUpdates(symbol);
+      
+      // Add to subscribed symbols
+      set((state) => ({
+        subscribedSymbols: new Set([...state.subscribedSymbols, symbol]),
+      }));
+      
+      console.log(`📊 Subscribed to indicators for ${symbol}`);
+    } catch (error) {
+      console.error(`Failed to subscribe to indicators for ${symbol}:`, error);
+      set({ error: error instanceof Error ? error.message : 'Failed to subscribe to indicators' });
+    }
+  },
+
+  unsubscribeFromIndicators: (symbol) => {
+    const { subscribedSymbols } = get();
+    if (!subscribedSymbols.has(symbol)) return;
+
+    try {
+      const indicatorService = IndicatorService.getInstance();
+      indicatorService.cleanup(symbol);
+      
+      set((state) => {
+        const newSubscribedSymbols = new Set(state.subscribedSymbols);
+        newSubscribedSymbols.delete(symbol);
+        
+        const newIndicatorStates = new Map(state.indicatorStates);
+        newIndicatorStates.delete(symbol);
+        
+        const newTradingSignals = new Map(state.tradingSignals);
+        newTradingSignals.delete(symbol);
+        
+        return {
+          subscribedSymbols: newSubscribedSymbols,
+          indicatorStates: newIndicatorStates,
+          tradingSignals: newTradingSignals,
+        };
+      });
+      
+      console.log(`📊 Unsubscribed from indicators for ${symbol}`);
+    } catch (error) {
+      console.error(`Failed to unsubscribe from indicators for ${symbol}:`, error);
+    }
+  },
+
+  updateMarketCandles: async (symbol, candles) => {
+    try {
+      const indicatorService = IndicatorService.getInstance();
+      await indicatorService.updateMarketData(symbol, candles);
+    } catch (error) {
+      console.error(`Failed to update market candles for ${symbol}:`, error);
+    }
+  },
+
+  getIndicatorState: (symbol) => {
+    const { indicatorStates } = get();
+    return indicatorStates.get(symbol) || null;
+  },
+
+  getTradingSignal: (symbol) => {
+    const { tradingSignals } = get();
+    return tradingSignals.get(symbol) || null;
+  },
+
+  executeSignalTrade: async (signal, amount) => {
+    const { openPosition, assessTradeRisk, recordTradeResult, riskManagementEnabled } = get();
+    
+    if (signal.type === 'HOLD') {
+      console.log('No trade executed for HOLD signal');
+      return false;
+    }
+
+    try {
+      // Extract symbol from signal message or use a default
+      const symbol = signal.message.includes('BTC') ? 'BTCUSDT' : 
+                    signal.message.includes('ETH') ? 'ETHUSDT' : 'BTCUSDT';
+      
+      // Risk assessment
+      let riskAssessment = null;
+      if (riskManagementEnabled) {
+        riskAssessment = assessTradeRisk(symbol, signal, amount);
+        
+        if (riskAssessment && !riskAssessment.approved) {
+          console.warn('🚫 Trade rejected by risk management:', riskAssessment.warnings);
+          set({ 
+            error: `Trade rejected: ${riskAssessment.warnings.join(', ')}` 
+          });
+          return false;
+        }
+        
+        if (riskAssessment) {
+          console.log('⚖️ Risk assessment passed:', riskAssessment.reasons);
+        }
+      }
+
+      // Use risk-adjusted parameters if available
+      const tradeAmount = riskAssessment?.recommendedPositionSize || amount;
+      const tradeLeverage = riskAssessment?.recommendedLeverage || 10;
+      
+      const success = await openPosition({
+        symbol,
+        side: signal.type === 'BUY' ? 'buy' : 'sell',
+        amount: tradeAmount,
+        leverage: tradeLeverage,
+        stopLoss: riskAssessment?.stopLoss || undefined,
+        takeProfit: riskAssessment?.takeProfit || undefined,
+      });
+      
+      if (success) {
+        console.log(`✅ Signal-based trade executed: ${signal.type} ${symbol} for ${tradeAmount.toFixed(2)} USDT (${tradeLeverage}x leverage)`);
+        
+        // Record the trade attempt
+        const tradeRecord: TradeHistory = {
+          symbol,
+          side: signal.type === 'BUY' ? 'buy' : 'sell',
+          amount: tradeAmount,
+          entryPrice: signal.price,
+          timestamp: Date.now(),
+        };
+        
+        recordTradeResult(tradeRecord);
+      }
+      
+      return success;
+    } catch (error) {
+      console.error('Failed to execute signal trade:', error);
+      set({ error: error instanceof Error ? error.message : 'Failed to execute signal trade' });
+      return false;
+    }
+  },
+
+  setAutoTrading: (enabled) => {
+    set({ autoTradingEnabled: enabled });
+    console.log(`🤖 Auto-trading ${enabled ? 'enabled' : 'disabled'}`);
+  },
+
+  // Risk management actions implementation
+  assessTradeRisk: (symbol, signal, amount) => {
+    const { balances, activeExchange, positions, tradeHistory, riskManagementEnabled } = get();
+    
+    if (!riskManagementEnabled) {
+      return {
+        approved: true,
+        riskLevel: 'MEDIUM' as const,
+        recommendedPositionSize: amount,
+        recommendedLeverage: 10,
+        stopLoss: null,
+        takeProfit: null,
+        warnings: [],
+        reasons: ['Risk management disabled'],
+      };
+    }
+
+    const balance = balances[activeExchange];
+    if (!balance || !balance.availableMargin) {
+      return null;
+    }
+
+    const riskService = RiskManagementService.getInstance();
+    
+    // Calculate daily P&L from trade history
+    const today = new Date().toDateString();
+    const dailyPnL = tradeHistory
+      .filter(trade => new Date(trade.timestamp).toDateString() === today)
+      .reduce((sum, trade) => sum + (trade.pnl || 0), 0);
+
+    const assessment = riskService.assessTrade({
+      symbol,
+      signal,
+      accountBalance: balance.availableMargin,
+      currentPositions: positions,
+      dailyPnL,
+      recentTrades: tradeHistory.slice(-10), // Last 10 trades
+    });
+
+    // Store the assessment
+    set((state) => {
+      const newAssessments = new Map(state.riskAssessments);
+      newAssessments.set(symbol, assessment);
+      return { riskAssessments: newAssessments };
+    });
+
+    return assessment;
+  },
+
+  recordTradeResult: (trade) => {
+    const riskService = RiskManagementService.getInstance();
+    riskService.recordTrade(trade);
+
+    set((state) => ({
+      tradeHistory: [...state.tradeHistory, trade],
+    }));
+
+    console.log(`📊 Trade recorded: ${trade.side.toUpperCase()} ${trade.symbol} - PnL: ${trade.pnl?.toFixed(2) || 'N/A'} USDT`);
+  },
+
+  getRiskStatistics: () => {
+    const riskService = RiskManagementService.getInstance();
+    return riskService.getRiskStatistics();
+  },
+
+  setRiskManagement: (enabled) => {
+    set({ riskManagementEnabled: enabled });
+    console.log(`⚖️ Risk management ${enabled ? 'enabled' : 'disabled'}`);
+  },
+
+  reset: () => {
+    // Clean up all indicator subscriptions before reset
+    const { subscribedSymbols } = get();
+    const indicatorService = IndicatorService.getInstance();
+    
+    subscribedSymbols.forEach(symbol => {
+      indicatorService.cleanup(symbol);
+    });
+    
+    set(initialState);
+  },
+}));

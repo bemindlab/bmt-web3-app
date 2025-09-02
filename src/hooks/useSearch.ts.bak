@@ -1,0 +1,126 @@
+import { useCallback } from 'react';
+import { useSearchStore } from '../stores/searchStore';
+import { CryptoApiService } from '../services/cryptoApi';
+import { StorageService } from '../services/storage';
+
+const cryptoApi = new CryptoApiService();
+
+export const useSearch = () => {
+  const {
+    searchQuery,
+    searchResults,
+    isSearching,
+    searchError,
+    watchlist,
+    watchlistData,
+    searchHistory,
+    setSearchResults,
+    setIsSearching,
+    setSearchError,
+    addToWatchlist,
+    removeFromWatchlist,
+    setWatchlistData,
+    isInWatchlist,
+    addToSearchHistory,
+    getCachedResults,
+    setCachedResults,
+  } = useSearchStore();
+
+  const initializeApiKey = useCallback(async () => {
+    // CoinGecko API key is optional - app works without it
+    // const keys = await StorageService.getApiKeys();
+  }, []);
+
+  const performSearch = useCallback(
+    async (query: string) => {
+      const trimmedQuery = query.trim();
+
+      if (trimmedQuery.length < 2) {
+        setSearchResults([]);
+        return;
+      }
+
+      // Check cache first
+      const cachedResults = getCachedResults(trimmedQuery);
+      if (cachedResults) {
+        setSearchResults(cachedResults);
+        return;
+      }
+
+      setIsSearching(true);
+      setSearchError(null);
+
+      try {
+        const results = await cryptoApi.searchCoins(trimmedQuery);
+
+        if (results) {
+          setSearchResults(results);
+          setCachedResults(trimmedQuery, results);
+
+          // Add to search history if we got results
+          if (results.length > 0) {
+            await addToSearchHistory(trimmedQuery);
+          }
+        } else {
+          setSearchError('Failed to fetch search results');
+          setSearchResults([]);
+        }
+      } catch {
+        setSearchError('An error occurred while searching');
+        setSearchResults([]);
+      } finally {
+        setIsSearching(false);
+      }
+    },
+    [
+      getCachedResults,
+      setCachedResults,
+      setSearchResults,
+      setIsSearching,
+      setSearchError,
+      addToSearchHistory,
+    ]
+  );
+
+  const refreshWatchlist = useCallback(async () => {
+    if (watchlist.length > 0) {
+      try {
+        const data = await cryptoApi.getCoinsByIds(watchlist);
+        if (data) {
+          setWatchlistData(data);
+        }
+      } catch (error) {
+        console.error('Error refreshing watchlist:', error);
+      }
+    }
+  }, [watchlist, setWatchlistData]);
+
+  const toggleWatchlist = useCallback(
+    async (coinId: string) => {
+      if (isInWatchlist(coinId)) {
+        await removeFromWatchlist(coinId);
+      } else {
+        await addToWatchlist(coinId);
+      }
+    },
+    [isInWatchlist, addToWatchlist, removeFromWatchlist]
+  );
+
+  return {
+    // State
+    searchQuery,
+    searchResults,
+    isSearching,
+    searchError,
+    watchlist,
+    watchlistData,
+    searchHistory,
+
+    // Actions
+    performSearch,
+    refreshWatchlist,
+    toggleWatchlist,
+    isInWatchlist,
+    initializeApiKey,
+  };
+};

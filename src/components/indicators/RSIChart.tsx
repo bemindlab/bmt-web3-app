@@ -1,0 +1,479 @@
+import React from 'react';
+import { View, Text, StyleSheet, ScrollView } from 'react-native';
+import { RSIDivergenceResult } from '../../lib/indicators/rsi';
+
+interface RSIChartProps {
+  results: RSIDivergenceResult[] | null;
+  compact?: boolean;
+  showDivergences?: boolean;
+}
+
+// Configuration constants
+const RSI_CONFIG = {
+  OVERBOUGHT: 70,
+  OVERSOLD: 30,
+  CHART_HEIGHT: 120,
+  COMPACT_HEIGHT: 60,
+  CHART_WIDTH: 300,
+  POINT_SIZE: 2,
+} as const;
+
+const RSI_COLORS = {
+  LINE: '#3B82F6',
+  OVERBOUGHT: '#EF4444',
+  OVERSOLD: '#10B981',
+  NEUTRAL: '#6B7280',
+  BULLISH_DIVERGENCE: '#10B981',
+  BEARISH_DIVERGENCE: '#EF4444',
+  BACKGROUND: '#F8FAFC',
+  GRID: '#E5E7EB',
+} as const;
+
+export const RSIChart: React.FC<RSIChartProps> = ({ 
+  results, 
+  compact = false, 
+  showDivergences = true 
+}) => {
+  if (!results || results.length === 0) {
+    return (
+      <View style={[styles.container, compact && styles.compactContainer]}>
+        <Text style={styles.noDataText}>No RSI data available</Text>
+      </View>
+    );
+  }
+
+  const latestResult = results[results.length - 1];
+  const chartHeight = compact ? RSI_CONFIG.COMPACT_HEIGHT : RSI_CONFIG.CHART_HEIGHT;
+
+  // Take last 50 points for chart display
+  const displayResults = results.slice(-50);
+  
+  if (compact) {
+    return (
+      <View style={styles.compactContainer}>
+        <View style={styles.compactHeader}>
+          <Text style={styles.compactTitle}>RSI ({latestResult.rsi.toFixed(1)})</Text>
+          <View style={[styles.rsiValueBadge, { backgroundColor: getRSIColor(latestResult.rsi) + '20' }]}>
+            <Text style={[styles.rsiValueText, { color: getRSIColor(latestResult.rsi) }]}>
+              {getRSICondition(latestResult.rsi)}
+            </Text>
+          </View>
+        </View>
+        
+        <View style={[styles.miniChart, { height: chartHeight }]}>
+          {renderMiniRSIChart(displayResults, chartHeight)}
+        </View>
+
+        {showDivergences && (latestResult.bullishDivergence || latestResult.bearishDivergence) && (
+          <View style={styles.divergenceAlert}>
+            <Text style={[styles.divergenceText, { 
+              color: latestResult.bullishDivergence ? RSI_COLORS.BULLISH_DIVERGENCE : RSI_COLORS.BEARISH_DIVERGENCE 
+            }]}>
+              {latestResult.bullishDivergence ? '📈 Bullish Divergence' : '📉 Bearish Divergence'}
+            </Text>
+          </View>
+        )}
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.container}>
+      <View style={styles.header}>
+        <Text style={styles.title}>RSI Indicator</Text>
+        <View style={[styles.rsiValueBadge, { backgroundColor: getRSIColor(latestResult.rsi) + '20' }]}>
+          <Text style={[styles.rsiValueText, { color: getRSIColor(latestResult.rsi) }]}>
+            RSI: {latestResult.rsi.toFixed(1)}
+          </Text>
+        </View>
+      </View>
+
+      {/* RSI Status */}
+      <View style={styles.statusContainer}>
+        <View style={styles.statusItem}>
+          <Text style={styles.statusLabel}>Condition</Text>
+          <Text style={[styles.statusValue, { color: getRSIColor(latestResult.rsi) }]}>
+            {getRSICondition(latestResult.rsi)}
+          </Text>
+        </View>
+        
+        {showDivergences && (
+          <View style={styles.statusItem}>
+            <Text style={styles.statusLabel}>Divergences</Text>
+            <Text style={[styles.statusValue, { color: getDivergenceColor(latestResult) }]}>
+              {getDivergenceStatus(latestResult)}
+            </Text>
+          </View>
+        )}
+      </View>
+
+      {/* Chart Container */}
+      <View style={[styles.chartContainer, { height: chartHeight + 40 }]}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          <View style={[styles.chart, { height: chartHeight, width: Math.max(RSI_CONFIG.CHART_WIDTH, displayResults.length * 6) }]}>
+            {renderRSIChart(displayResults, chartHeight)}
+          </View>
+        </ScrollView>
+      </View>
+
+      {/* Legend */}
+      <View style={styles.legend}>
+        <View style={styles.legendItem}>
+          <View style={[styles.legendDot, { backgroundColor: RSI_COLORS.OVERBOUGHT }]} />
+          <Text style={styles.legendText}>Overbought (70+)</Text>
+        </View>
+        <View style={styles.legendItem}>
+          <View style={[styles.legendDot, { backgroundColor: RSI_COLORS.OVERSOLD }]} />
+          <Text style={styles.legendText}>Oversold (30-)</Text>
+        </View>
+        <View style={styles.legendItem}>
+          <View style={[styles.legendDot, { backgroundColor: RSI_COLORS.LINE }]} />
+          <Text style={styles.legendText}>RSI Line</Text>
+        </View>
+      </View>
+
+      {/* Divergence Alerts */}
+      {showDivergences && (latestResult.bullishDivergence || latestResult.bearishDivergence) && (
+        <View style={[styles.divergenceAlert, { 
+          borderLeftColor: latestResult.bullishDivergence ? RSI_COLORS.BULLISH_DIVERGENCE : RSI_COLORS.BEARISH_DIVERGENCE 
+        }]}>
+          <View style={styles.divergenceHeader}>
+            <Text style={styles.divergenceEmoji}>
+              {latestResult.bullishDivergence ? '📈' : '📉'}
+            </Text>
+            <Text style={[styles.divergenceTitle, { 
+              color: latestResult.bullishDivergence ? RSI_COLORS.BULLISH_DIVERGENCE : RSI_COLORS.BEARISH_DIVERGENCE 
+            }]}>
+              {latestResult.bullishDivergence ? 'Bullish RSI Divergence' : 'Bearish RSI Divergence'}
+            </Text>
+          </View>
+          <Text style={styles.divergenceDescription}>
+            {latestResult.bullishDivergence 
+              ? 'Price making lower lows while RSI makes higher lows - potential reversal upward'
+              : 'Price making higher highs while RSI makes lower highs - potential reversal downward'
+            }
+          </Text>
+          <View style={styles.alertScores}>
+            <Text style={styles.alertScoreText}>
+              Alert Score: {latestResult.bullishDivergence ? latestResult.bullishDivergenceAlert : latestResult.bearishDivergenceAlert}/100
+            </Text>
+          </View>
+        </View>
+      )}
+    </View>
+  );
+};
+
+// Chart rendering functions
+function renderRSIChart(results: RSIDivergenceResult[], height: number): React.ReactNode {
+  const points = results.map((result, index) => {
+    const x = (index / (results.length - 1)) * 100; // Percentage across width
+    const y = ((100 - result.rsi) / 100) * height; // Inverted Y for chart
+    return { x, y, rsi: result.rsi, result };
+  });
+
+  return (
+    <View style={styles.chartCanvas}>
+      {/* Background grid lines */}
+      <View style={[styles.gridLine, styles.overboughtLine, { top: (30 / 100) * height }]} />
+      <View style={[styles.gridLine, styles.oversoldLine, { top: (70 / 100) * height }]} />
+      <View style={[styles.gridLine, styles.midLine, { top: (50 / 100) * height }]} />
+
+      {/* RSI line path - simplified as points for React Native */}
+      {points.map((point, index) => (
+        <View
+          key={index}
+          style={[
+            styles.chartPoint,
+            {
+              left: `${point.x}%`,
+              top: point.y,
+              backgroundColor: point.result.bullishDivergence 
+                ? RSI_COLORS.BULLISH_DIVERGENCE 
+                : point.result.bearishDivergence 
+                ? RSI_COLORS.BEARISH_DIVERGENCE 
+                : RSI_COLORS.LINE,
+            }
+          ]}
+        />
+      ))}
+
+      {/* Labels */}
+      <Text style={[styles.chartLabel, styles.overboughtLabel, { top: (25 / 100) * height }]}>70</Text>
+      <Text style={[styles.chartLabel, styles.oversoldLabel, { top: (75 / 100) * height }]}>30</Text>
+    </View>
+  );
+}
+
+function renderMiniRSIChart(results: RSIDivergenceResult[], height: number): React.ReactNode {
+  const points = results.slice(-20).map((result, index) => {
+    const x = (index / 19) * 100; // Percentage across width
+    const y = ((100 - result.rsi) / 100) * height;
+    return { x, y, rsi: result.rsi };
+  });
+
+  return (
+    <View style={styles.miniChartCanvas}>
+      {/* Simplified grid */}
+      <View style={[styles.miniGridLine, { top: (30 / 100) * height, backgroundColor: RSI_COLORS.OVERBOUGHT }]} />
+      <View style={[styles.miniGridLine, { top: (70 / 100) * height, backgroundColor: RSI_COLORS.OVERSOLD }]} />
+      
+      {/* Mini points */}
+      {points.map((point, index) => (
+        <View
+          key={index}
+          style={[
+            styles.miniChartPoint,
+            {
+              left: `${point.x}%`,
+              top: point.y,
+              backgroundColor: getRSIColor(point.rsi),
+            }
+          ]}
+        />
+      ))}
+    </View>
+  );
+}
+
+// Helper functions
+function getRSIColor(rsi: number): string {
+  if (rsi >= RSI_CONFIG.OVERBOUGHT) return RSI_COLORS.OVERBOUGHT;
+  if (rsi <= RSI_CONFIG.OVERSOLD) return RSI_COLORS.OVERSOLD;
+  return RSI_COLORS.NEUTRAL;
+}
+
+function getRSICondition(rsi: number): string {
+  if (rsi >= RSI_CONFIG.OVERBOUGHT) return 'Overbought';
+  if (rsi <= RSI_CONFIG.OVERSOLD) return 'Oversold';
+  return 'Normal';
+}
+
+function getDivergenceColor(result: RSIDivergenceResult): string {
+  if (result.bullishDivergence) return RSI_COLORS.BULLISH_DIVERGENCE;
+  if (result.bearishDivergence) return RSI_COLORS.BEARISH_DIVERGENCE;
+  return RSI_COLORS.NEUTRAL;
+}
+
+function getDivergenceStatus(result: RSIDivergenceResult): string {
+  if (result.bullishDivergence) return 'Bullish';
+  if (result.bearishDivergence) return 'Bearish';
+  return 'None';
+}
+
+const styles = StyleSheet.create({
+  container: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    padding: 16,
+    marginVertical: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  compactContainer: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 8,
+    padding: 12,
+    marginVertical: 4,
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  compactHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  title: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#111827',
+  },
+  compactTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#111827',
+  },
+  rsiValueBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  rsiValueText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  statusContainer: {
+    flexDirection: 'row',
+    gap: 20,
+    marginBottom: 16,
+  },
+  statusItem: {
+    flex: 1,
+  },
+  statusLabel: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: '#6B7280',
+    marginBottom: 4,
+    textTransform: 'uppercase',
+  },
+  statusValue: {
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  chartContainer: {
+    marginVertical: 12,
+    backgroundColor: RSI_COLORS.BACKGROUND,
+    borderRadius: 8,
+    padding: 8,
+  },
+  chart: {
+    position: 'relative',
+  },
+  miniChart: {
+    backgroundColor: RSI_COLORS.BACKGROUND,
+    borderRadius: 4,
+    marginVertical: 8,
+    position: 'relative',
+  },
+  chartCanvas: {
+    flex: 1,
+    position: 'relative',
+  },
+  miniChartCanvas: {
+    flex: 1,
+    position: 'relative',
+  },
+  gridLine: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 1,
+  },
+  miniGridLine: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 1,
+    opacity: 0.6,
+  },
+  overboughtLine: {
+    backgroundColor: RSI_COLORS.OVERBOUGHT,
+    opacity: 0.3,
+  },
+  oversoldLine: {
+    backgroundColor: RSI_COLORS.OVERSOLD,
+    opacity: 0.3,
+  },
+  midLine: {
+    backgroundColor: RSI_COLORS.GRID,
+    opacity: 0.5,
+  },
+  chartPoint: {
+    position: 'absolute',
+    width: RSI_CONFIG.POINT_SIZE,
+    height: RSI_CONFIG.POINT_SIZE,
+    borderRadius: RSI_CONFIG.POINT_SIZE / 2,
+    marginLeft: -RSI_CONFIG.POINT_SIZE / 2,
+    marginTop: -RSI_CONFIG.POINT_SIZE / 2,
+  },
+  miniChartPoint: {
+    position: 'absolute',
+    width: 1.5,
+    height: 1.5,
+    borderRadius: 0.75,
+    marginLeft: -0.75,
+    marginTop: -0.75,
+  },
+  chartLabel: {
+    position: 'absolute',
+    right: 4,
+    fontSize: 10,
+    fontWeight: '500',
+    color: '#6B7280',
+  },
+  overboughtLabel: {
+    color: RSI_COLORS.OVERBOUGHT,
+  },
+  oversoldLabel: {
+    color: RSI_COLORS.OVERSOLD,
+  },
+  legend: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#F3F4F6',
+  },
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  legendDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  legendText: {
+    fontSize: 10,
+    color: '#6B7280',
+  },
+  divergenceAlert: {
+    backgroundColor: '#F8FAFC',
+    borderLeftWidth: 4,
+    borderRadius: 8,
+    padding: 12,
+    marginTop: 12,
+  },
+  divergenceHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 4,
+  },
+  divergenceEmoji: {
+    fontSize: 16,
+  },
+  divergenceTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  divergenceText: {
+    fontSize: 11,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  divergenceDescription: {
+    fontSize: 12,
+    color: '#6B7280',
+    lineHeight: 16,
+    marginBottom: 8,
+  },
+  alertScores: {
+    alignItems: 'flex-end',
+  },
+  alertScoreText: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: '#6B7280',
+  },
+  noDataText: {
+    fontSize: 14,
+    color: '#9CA3AF',
+    textAlign: 'center',
+    padding: 20,
+  },
+});
+
+export default RSIChart;
